@@ -1,4 +1,4 @@
-﻿//! Identity of the current user and machine.
+//! Identity of the current user and machine.
 
 /// Windows username: `USERNAME` env var, then `GetUserNameW`, then `"unknown"`.
 pub fn windows_username() -> String {
