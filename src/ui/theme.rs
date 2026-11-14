@@ -1,4 +1,4 @@
-//! Palette, fonts and egui style: a warm, calm look (cream background,
+﻿//! Palette, fonts and egui style: a warm, calm look (cream background,
 //! sidebar, serif headings, terracotta accent, rounded cards and pills).
 
 use egui::{Color32, CornerRadius, FontDefinitions, FontFamily, Margin, RichText, Shadow, Stroke, Visuals};
@@ -72,13 +72,14 @@ pub fn serif() -> FontFamily {
     FontFamily::Name("serif".into())
 }
 
-/// Registers the fonts: proportional UI text, a `serif` family for headings,
+/// The medium-weight family used for emphasis (Inter Medium).
+pub fn medium() -> FontFamily {
+    FontFamily::Name("medium".into())
+}
+
+/// Registers the fonts: Inter for proportional UI text, Inter Medium as
+/// `medium`, Source Serif 4 as `serif` (Semibold, headings) and `serif-regular`,
 /// and the Phosphor icons merged into the proportional family.
-///
-/// For now both families use egui's built-in fonts. To embed the intended
-/// open-licence fonts, add these files to `assets/fonts/` and register them in
-/// [`add_text_fonts`] only: `Inter-Regular.ttf`, `Inter-SemiBold.ttf`,
-/// `SourceSerif4-Regular.ttf`, `SourceSerif4-Semibold.ttf`.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     add_text_fonts(&mut fonts);
@@ -86,13 +87,29 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Sets up the proportional and serif families. Today the serif family is an
-/// alias of the default proportional fonts.
+/// Embeds the text fonts. egui's defaults stay after ours as fallback for
+/// glyphs the embedded fonts lack. Monospace is left alone.
 fn add_text_fonts(fonts: &mut FontDefinitions) {
-    let proportional = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    fonts.families.insert(serif(), proportional);
+    let faces: [(&str, &[u8]); 4] = [
+        ("Inter-Regular", include_bytes!("../../assets/fonts/Inter-Regular.ttf")),
+        ("Inter-Medium", include_bytes!("../../assets/fonts/Inter-Medium.ttf")),
+        ("SourceSerif4-Regular", include_bytes!("../../assets/fonts/SourceSerif4-Regular.ttf")),
+        ("SourceSerif4-Semibold", include_bytes!("../../assets/fonts/SourceSerif4-Semibold.ttf")),
+    ];
+    for (name, bytes) in faces {
+        fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_static(bytes)));
+    }
+    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let with_fallback = |first: &str| {
+        let mut list = vec![first.to_owned()];
+        list.extend(fallback.iter().cloned());
+        list
+    };
+    fonts.families.insert(FontFamily::Proportional, with_fallback("Inter-Regular"));
+    fonts.families.insert(medium(), with_fallback("Inter-Medium"));
+    fonts.families.insert(serif(), with_fallback("SourceSerif4-Semibold"));
+    fonts.families.insert(FontFamily::Name("serif-regular".into()), with_fallback("SourceSerif4-Regular"));
 }
-
 /// Applies the palette and shapes for `t` and makes it the active theme.
 pub fn apply(ctx: &egui::Context, t: Theme) {
     let pal = palette(t);

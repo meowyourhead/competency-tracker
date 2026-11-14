@@ -1,4 +1,4 @@
-//! Summary (home) page: at a glance, who is due for retraining and on which
+﻿//! Summary (home) page: at a glance, who is due for retraining and on which
 //! tests. Stat cards, filters, and the due list as cards grouped by person or
 //! by test system.
 
@@ -77,7 +77,7 @@ fn page(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
     let session: &Session = cx.session;
     let data = session.data();
     if data.staff.is_empty() {
-        empty_state(ui, "No data yet", "Import your Excel tracker from Settings.");
+        empty_state(ui, "No data yet \u{2014} import your Excel tracker from Settings", "");
         return;
     }
     state.refresh(session, cx.today);
@@ -92,8 +92,7 @@ fn page(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
 
     let shown = filter_items(all, filter);
     let any_due = shown.iter().any(|i| matches!(i.status, DueStatus::Overdue | DueStatus::DueSoon));
-    let narrowed = filter.section.is_some() || filter.test.is_some() || filter.title.is_some() || !filter.text.trim().is_empty();
-    if filter.status == StatusFilter::All && !any_due && (!shown.is_empty() || !narrowed) {
+    if filter.status == StatusFilter::All && !narrowed(filter) && !any_due {
         empty_state(ui, "Everyone is up to date", &format!("Nothing is overdue or due within {soon_days} days."));
         return;
     }
@@ -108,6 +107,16 @@ fn page(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
     if picked.is_some() {
         *cx.open_detail = picked;
     }
+}
+
+/// True when the search text is empty or only whitespace.
+fn text_blank(filter: &DueFilter) -> bool {
+    filter.text.trim().is_empty()
+}
+
+/// True when section, test, title or search text narrows the list (status aside).
+fn narrowed(filter: &DueFilter) -> bool {
+    filter.section.is_some() || filter.test.is_some() || filter.title.is_some() || !text_blank(filter)
 }
 
 /// Overdue, due soon, on track, delayed. Counts follow every filter except
@@ -150,7 +159,7 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, filter: &mut DueFilter
         let any = filter.section.is_some()
             || filter.test.is_some()
             || filter.title.is_some()
-            || !filter.text.is_empty()
+            || !text_blank(filter)
             || filter.status != StatusFilter::All;
         if any && ui.add(Button::new(RichText::new("Clear filters").color(pal.muted)).frame(false)).clicked() {
             *filter = DueFilter::default();
@@ -160,7 +169,7 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, filter: &mut DueFilter
 }
 
 /// The non-retired tests of `section`, or of every non-retired section
-/// (labelled "test · section") when none is chosen.
+/// (labelled "test Â· section") when none is chosen.
 fn test_options(data: &Data, section: Option<&str>) -> Vec<(Id, String)> {
     let mut out = Vec::new();
     for sec in data.sections_sorted().into_iter().filter(|s| !s.retired) {
@@ -245,7 +254,7 @@ fn cards(ui: &mut egui::Ui, pal: &Palette, groups: Vec<(Id, Vec<&DueItem>)>, by:
 }
 
 /// A clickable row: primary text, muted details, and the due pill on the
-/// right. Its accessible name is "staff · test". Returns true when clicked.
+/// right. Its accessible name is "staff Â· test". Returns true when clicked.
 fn due_row(ui: &mut egui::Ui, pal: &Palette, item: &DueItem, primary: &str, secondary: &str) -> bool {
     let mut pill_clicked = false;
     let builder = UiBuilder::new().id_salt((&item.staff_id, &item.test_id)).sense(Sense::click());

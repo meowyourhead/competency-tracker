@@ -1,4 +1,4 @@
-//! Smoke tests for the app shell, driven headlessly with egui_kittest.
+﻿//! Smoke tests for the app shell, driven headlessly with egui_kittest.
 
 use std::time::Instant;
 
@@ -214,3 +214,60 @@ fn summary_empty_states() {
     h.get_by_label("Everyone is up to date");
     assert!(h.query_by_label("Agnes").is_none());
 }
+
+#[test]
+fn fonts_register_serif_and_medium_and_headings_render() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(TrackerApp::new_for_test(session(&dir, 1)));
+    // Fonts installed on the first pass take effect on the next one.
+    h.run();
+    h.step();
+    let families: Vec<egui::FontFamily> = h.ctx.fonts(|f| f.definitions().families.keys().cloned().collect());
+    for name in ["serif", "serif-regular", "medium"] {
+        assert!(families.contains(&egui::FontFamily::Name(name.into())), "missing family {name}");
+    }
+    let regular = h.ctx.fonts(|f| f.definitions().families[&egui::FontFamily::Proportional][0].clone());
+    assert_eq!(regular, "Inter-Regular");
+    // The Summary page title is a serif heading and must render without panicking.
+    assert!(h.query_all_by_label("Summary").count() >= 2, "sidebar entry and serif page title");
+}
+
+#[test]
+fn summary_search_narrowing_on_track_person_lists_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 30); // both on track
+    h.get_by_label("Everyone is up to date");
+    summary_search(&h).click();
+    h.run();
+    summary_search(&h).type_text("Agnes");
+    h.run();
+    assert!(h.query_by_label("Everyone is up to date").is_none(), "a narrowing filter lists rows instead");
+    h.get_by_label("Agnes");
+    assert!(h.query_by_label("Bram").is_none());
+}
+
+#[test]
+fn summary_search_with_no_match_shows_no_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 30);
+    summary_search(&h).click();
+    h.run();
+    summary_search(&h).type_text("zzzz");
+    h.run();
+    h.get_by_label("No matches");
+    assert!(h.query_by_label("Everyone is up to date").is_none());
+}
+
+#[test]
+fn summary_no_data_state_reads_full_sentence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(TrackerApp::new_for_test(session(&dir, 1)));
+    h.run();
+    h.get_by_label("No data yet \u{2014} import your Excel tracker from Settings");
+}
+
+/// The Summary page's search box (the last text input in the tree).
+fn summary_search<'a>(h: &'a Harness<'static, TrackerApp>) -> egui_kittest::Node<'a> {
+    h.query_all_by_role(egui::accesskit::Role::TextInput).last().expect("search box")
+}
+
