@@ -141,7 +141,7 @@ pub struct Counts {
     pub delayed: usize,
 }
 
-pub fn counts(items: &[DueItem]) -> Counts {
+pub fn counts<'a>(items: impl IntoIterator<Item = &'a DueItem>) -> Counts {
     let mut c = Counts::default();
     for i in items {
         match i.status {
