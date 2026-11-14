@@ -1,12 +1,12 @@
-//! The application shell: per-frame session tick, sidebar, banner, toasts,
-//! modals, page routing and safe close handling.
+//! The application shell: per-frame session tick, sidebar, page routing and
+//! safe close handling. The banner, modals and toasts are in `overlays.rs`.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 use egui::{
-    Align, Align2, CentralPanel, Frame, Key, Layout, Margin, Modifiers, Panel, Popup, RichText, ScrollArea, Sense,
+    Align, CentralPanel, Frame, Key, Layout, Margin, Modifiers, Panel, Popup, RichText, ScrollArea, Sense,
     ViewportCommand,
 };
 use egui_phosphor::regular as icon;
@@ -16,9 +16,11 @@ use crate::lock::Acquire;
 use crate::model::{Id, Ts};
 use crate::prefs::{save_prefs_to, Prefs, Theme};
 use crate::query::{search, SearchHit};
-use crate::session::{LeaveReason, Mode, Session, SessionEvent};
+use crate::session::{LeaveReason, Session, SessionEvent};
 use crate::ui::audit::{self, AuditState};
 use crate::ui::detail::{self, DetailState};
+use crate::ui::overlays::{self, ModalChoice};
+pub use crate::ui::overlays::{Modal, PendingAction, Toast};
 use crate::ui::personnel::{self, PersonnelState};
 use crate::ui::sections::{self, SectionsState};
 use crate::ui::settings::{self, SettingsState};
@@ -59,35 +61,6 @@ impl Page {
     }
 }
 
-/// A short confirmation shown bottom-centre.
-pub struct Toast {
-    text: String,
-    until: Instant,
-}
-
-impl Toast {
-    pub fn new(text: impl Into<String>) -> Toast {
-        Toast::lasting(text, Duration::from_secs(3))
-    }
-
-    pub fn lasting(text: impl Into<String>, d: Duration) -> Toast {
-        Toast { text: text.into(), until: Instant::now() + d }
-    }
-}
-
-/// An action that runs once the user confirms it. Pages add variants as they
-/// need confirmations (Tasks 12–16).
-pub enum PendingAction {}
-
-pub enum Modal {
-    Confirm { title: String, body: String, action: PendingAction },
-    InactivityCountdown,
-    /// Saving on close failed: offer Retry or Quit anyway.
-    ExitFailed { error: String },
-    /// "Quit anyway" ran; `rescued` is the rescue copy, if one was written.
-    ExitRescued { rescued: Option<PathBuf> },
-}
-
 /// The per-frame context passed to page functions.
 #[allow(dead_code)] // Fields are consumed by the pages as Tasks 12–16 fill them in.
 pub(crate) struct Ctx<'a> {
@@ -119,12 +92,6 @@ pub struct TrackerApp {
     audit: AuditState,
     settings: SettingsState,
     detail: DetailState,
-}
-
-enum Tone {
-    Error,
-    Warn,
-    Info,
 }
 
 impl TrackerApp {
@@ -183,11 +150,16 @@ impl TrackerApp {
         let (now, inst) = (now_ts(), Instant::now());
         if ctx.input(|i| !i.events.is_empty()) {
             self.session.note_activity(inst);
+            // Activity ends any countdown at once, so it never goes stale.
+            self.warn_deadline = None;
+            if matches!(self.modal, Some(Modal::InactivityCountdown)) {
+                self.modal = None;
+            }
         }
         for ev in self.session.tick(now, inst) {
             self.on_event(ev, inst);
         }
-        self.handle_close(&ctx, now);
+        self.handle_close(&ctx, now, inst);
         self.toasts.retain(|t| t.until > inst);
         let focus_search = self.modal.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K));
         if focus_search && self.prefs.sidebar_collapsed {
@@ -201,7 +173,9 @@ impl TrackerApp {
             .resizable(false)
             .frame(Frame::new().fill(pal.sidebar).inner_margin(Margin::same(12)))
             .show(ui, |ui| self.sidebar(ui, &pal, now, inst, focus_search));
-        self.banner(ui, &pal, now, inst);
+        if overlays::banner(ui, &pal, &self.session) {
+            self.start_editing(now, inst);
+        }
         let today = now.date_naive();
         if self.open_detail.is_some() {
             Panel::right("detail")
@@ -241,7 +215,7 @@ impl TrackerApp {
                 });
             });
         self.show_modal(&ctx, now, inst);
-        self.show_toasts(&ctx, &pal);
+        overlays::show_toasts(&ctx, &pal, &self.toasts);
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 
@@ -281,15 +255,66 @@ impl TrackerApp {
 
     /// eframe cannot cancel a close from `on_exit`, so save here: a failed
     /// save cancels the close and asks Retry / Quit anyway.
-    fn handle_close(&mut self, ctx: &egui::Context, now: Ts) {
+    fn handle_close(&mut self, ctx: &egui::Context, now: Ts, inst: Instant) {
         if self.allow_close || !ctx.input(|i| i.viewport().close_requested()) {
             return;
         }
-        match self.session.on_exit(now) {
-            Ok(()) => self.allow_close = true,
-            Err(error) => {
-                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                self.modal = Some(Modal::ExitFailed { error });
+        if self.finish_exit(now, inst) {
+            self.allow_close = true;
+        } else {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        }
+    }
+
+    /// Saves and releases for closing. Returns false (with a modal set) when
+    /// the close must wait: the save failed, or the lock was lost and the
+    /// edits went to the conflicts folder (the user is told where first).
+    fn finish_exit(&mut self, now: Ts, inst: Instant) -> bool {
+        if let Err(error) = self.session.on_exit(now) {
+            self.modal = Some(Modal::ExitFailed { error });
+            return false;
+        }
+        let mut conflict = None;
+        for ev in self.session.take_events() {
+            match ev {
+                SessionEvent::Conflict(path) => conflict = Some(path),
+                ev => self.on_event(ev, inst),
+            }
+        }
+        match conflict {
+            Some(path) => {
+                self.modal = Some(Modal::ExitConflict { path });
+                false
+            }
+            None => true,
+        }
+    }
+
+    fn show_modal(&mut self, ctx: &egui::Context, now: Ts, inst: Instant) {
+        let Some(modal) = &self.modal else { return };
+        let Some(choice) = overlays::show_modal(ctx, modal, self.warn_deadline, inst) else { return };
+        match choice {
+            ModalChoice::Close => self.modal = None,
+            ModalChoice::Confirm => {
+                if let Some(Modal::Confirm { action, .. }) = self.modal.take() {
+                    match action {}
+                }
+            }
+            ModalChoice::Stay => {
+                self.session.note_activity(inst);
+                self.warn_deadline = None;
+                self.modal = None;
+            }
+            ModalChoice::RetryExit => {
+                if self.finish_exit(now, inst) {
+                    self.modal = None;
+                    self.quit(ctx);
+                }
+            }
+            ModalChoice::QuitAnyway => self.modal = Some(Modal::ExitRescued { rescued: self.session.abandon(now) }),
+            ModalChoice::Quit => {
+                self.modal = None;
+                self.quit(ctx);
             }
         }
     }
@@ -458,150 +483,6 @@ impl TrackerApp {
             self.search.clear();
         }
     }
-
-    /// The single most important banner, if any: load error, read-only,
-    /// save error, corrupt files, then viewing / editing available.
-    fn banner(&mut self, ui: &mut egui::Ui, pal: &Palette, now: Ts, inst: Instant) {
-        let s = &self.session;
-        let mut start_button = false;
-        let mut hover = None;
-        let (tone, text) = if let Some(e) = s.load_error() {
-            (Tone::Error, format!("Can't read the data folder: {e}"))
-        } else if s.read_only_reason().is_some() {
-            (Tone::Warn, "Read-only: data saved by a newer version".to_owned())
-        } else if let Some(e) = s.save_error() {
-            hover = Some(e.to_owned());
-            (Tone::Error, "Not saved \u{2014} retrying".to_owned())
-        } else if !s.corrupt_files().is_empty() {
-            let names: Vec<String> =
-                s.corrupt_files().iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
-            (Tone::Warn, format!("Skipped unreadable snapshot files: {}", names.join(", ")))
-        } else {
-            match s.mode() {
-                Mode::Editing => return,
-                Mode::Viewing { holder: Some(h) } => (
-                    Tone::Info,
-                    format!("Viewing \u{2014} {} is editing (since {})", h.user, h.acquired_at.format("%H:%M")),
-                ),
-                Mode::Viewing { holder: None } => {
-                    start_button = true;
-                    (Tone::Info, "Editing is available".to_owned())
-                }
-            }
-        };
-        let (fill, fg) = match tone {
-            Tone::Error => (pal.red_bg, pal.red_fg),
-            Tone::Warn => (pal.yellow_bg, pal.yellow_fg),
-            Tone::Info => (pal.grey_bg, pal.text),
-        };
-        let glyph = match tone {
-            Tone::Error | Tone::Warn => icon::WARNING,
-            Tone::Info => icon::EYE,
-        };
-        Panel::top("banner").frame(Frame::new().fill(fill).inner_margin(Margin::symmetric(20, 8))).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(glyph).color(fg));
-                let resp = ui.label(RichText::new(text).color(fg));
-                if let Some(h) = hover {
-                    resp.on_hover_text(h);
-                }
-                if start_button && ui.button("Start editing").clicked() {
-                    self.start_editing(now, inst);
-                }
-            });
-        });
-    }
-
-    fn show_modal(&mut self, ctx: &egui::Context, now: Ts, inst: Instant) {
-        let Some(modal) = &self.modal else { return };
-        let session = &mut self.session;
-        let (mut close, mut confirm, mut quit, mut next) = (false, false, false, None);
-        let frame = Frame::window(&ctx.global_style()).inner_margin(Margin::same(24));
-        let resp = egui::Modal::new(egui::Id::new("app_modal")).frame(frame).show(ctx, |ui| {
-            ui.set_max_width(440.0);
-            let title = |ui: &mut egui::Ui, t: &str| ui.label(RichText::new(t).family(serif()).size(20.0));
-            match modal {
-                Modal::Confirm { title: t, body, .. } => {
-                    title(ui, t);
-                    ui.label(body.as_str());
-                    ui.horizontal(|ui| {
-                        confirm = ui.button("Confirm").clicked();
-                        close = ui.button("Cancel").clicked();
-                    });
-                }
-                Modal::InactivityCountdown => {
-                    let left = self.warn_deadline.map_or(0, |d| d.saturating_duration_since(inst).as_secs());
-                    title(ui, "Still there?");
-                    ui.label(format!("Editing stops in {left} s because there has been no activity."));
-                    if ui.button("Stay").clicked() {
-                        session.note_activity(inst);
-                        close = true;
-                    }
-                }
-                Modal::ExitFailed { error } => {
-                    title(ui, "Couldn't save your changes");
-                    ui.label(format!("Couldn't save your changes: {error}"));
-                    ui.horizontal(|ui| {
-                        if ui.button("Retry").clicked() {
-                            match session.on_exit(now) {
-                                Ok(()) => quit = true,
-                                Err(error) => next = Some(Modal::ExitFailed { error }),
-                            }
-                        }
-                        if ui.button("Quit anyway").clicked() {
-                            next = Some(Modal::ExitRescued { rescued: session.abandon(now) });
-                        }
-                    });
-                }
-                Modal::ExitRescued { rescued } => {
-                    title(ui, "Quitting without saving");
-                    match rescued {
-                        Some(p) => ui.label(format!("Your unsaved changes were copied to {}", p.display())),
-                        None => ui.label("Your unsaved changes could not be rescued."),
-                    };
-                    quit = ui.button("Close").clicked();
-                }
-            }
-        });
-        let dismissable = matches!(modal, Modal::Confirm { .. } | Modal::InactivityCountdown);
-        if dismissable && resp.should_close() {
-            close = true;
-            if matches!(modal, Modal::InactivityCountdown) {
-                session.note_activity(inst);
-            }
-        }
-        if confirm {
-            if let Some(Modal::Confirm { action, .. }) = self.modal.take() {
-                match action {}
-            }
-        } else if let Some(m) = next {
-            self.modal = Some(m);
-        } else if close || quit {
-            self.modal = None;
-        }
-        if quit {
-            self.quit(ctx);
-        }
-    }
-
-    fn show_toasts(&self, ctx: &egui::Context, pal: &Palette) {
-        if self.toasts.is_empty() {
-            return;
-        }
-        egui::Area::new(egui::Id::new("toasts"))
-            .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
-            .order(egui::Order::Foreground)
-            .interactable(false)
-            .show(ctx, |ui| {
-                for t in &self.toasts {
-                    Frame::new()
-                        .fill(pal.text)
-                        .corner_radius(10)
-                        .inner_margin(Margin::symmetric(14, 8))
-                        .show(ui, |ui| ui.label(RichText::new(&t.text).color(pal.bg)));
-                }
-            });
-    }
 }
 
 impl eframe::App for TrackerApp {
@@ -623,5 +504,33 @@ impl eframe::App for TrackerApp {
         if self.session.on_exit(now).is_err() {
             let _ = self.session.abandon(now);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::DataDir;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    #[test]
+    fn countdown_closes_on_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+        let session = Session::open(data_dir, "tester", "pc", 1, now_ts(), Instant::now()).unwrap();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1280.0, 800.0))
+            .build_ui_state(|ui, app: &mut TrackerApp| app.show_root(ui), TrackerApp::new_for_test(session));
+        h.state_mut().warn_deadline = Some(Instant::now() + Duration::from_secs(40));
+        h.state_mut().modal = Some(Modal::InactivityCountdown);
+        h.run();
+        assert!(h.query_by_label("Still there?").is_some());
+
+        h.event(egui::Event::Text("x".into()));
+        h.run();
+        assert!(h.query_by_label("Still there?").is_none(), "typing ends the countdown");
+        assert!(h.state().modal.is_none());
+        assert!(h.state().warn_deadline.is_none());
     }
 }

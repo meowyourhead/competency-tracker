@@ -264,6 +264,11 @@ impl Session {
         std::mem::take(&mut self.pending)
     }
 
+    /// Events produced since the last `tick` (e.g. by `on_exit`), without ticking.
+    pub fn take_events(&mut self) -> Vec<SessionEvent> {
+        std::mem::take(&mut self.pending)
+    }
+
     /// Takes the lock (if free or stale), then loads the newest snapshot so
     /// editing never starts on stale data.
     pub fn start_editing(&mut self, now: Ts, inst: Instant) -> io::Result<Acquire> {
