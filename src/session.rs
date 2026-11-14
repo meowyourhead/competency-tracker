@@ -16,6 +16,9 @@ use crate::snapshot::{self, DataDir, Loaded};
 pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_secs(3);
 pub const POLL_EVERY: Duration = Duration::from_secs(10);
 pub const WARNING_BEFORE: Duration = Duration::from_secs(60);
+/// Save at the latest this long after the data first became dirty, even if
+/// changes keep resetting the debounce.
+const AUTOSAVE_MAX_WAIT: Duration = Duration::from_secs(30);
 /// After a failed save, wait this long before retrying.
 const SAVE_RETRY: Duration = Duration::from_secs(10);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(HEARTBEAT_SECS as u64);
@@ -58,6 +61,11 @@ pub struct Session {
     mode: Mode,
     revision: u64,
     dirty: bool,
+    /// When the data last went from clean to dirty (bounds the debounce).
+    dirty_since: Option<Ts>,
+    /// Unsaved edits that could not be exported after losing the lock. While
+    /// set they are never replaced by a reload; export is retried every poll.
+    unrescued: bool,
     saved_this_session: bool,
     changed_at: Option<Ts>,
     failed_at: Option<Ts>,
@@ -72,6 +80,16 @@ pub struct Session {
     available_announced: bool,
     /// Events produced outside `tick` (or before it), returned by the next `tick`.
     pending: Vec<SessionEvent>,
+    /// Where `abandon` writes unsaved data (`%LOCALAPPDATA%\CompetencyTracker\rescue`).
+    rescue_dir: PathBuf,
+}
+
+fn default_rescue_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("CompetencyTracker")
+        .join("rescue")
 }
 
 /// True when at least `d` has passed from `since` to `now` (or the clock went back).
@@ -83,12 +101,11 @@ fn unknown_holder(now: Ts) -> LockInfo {
     LockInfo { user: "unknown".into(), machine: "unknown".into(), pid: 0, acquired_at: now, heartbeat_at: now }
 }
 
-/// Writes `"{file stem} - conflict {HHmmss}.json"` in the conflicts folder.
-fn write_conflict(dir: &DataDir, data: &Data, file_name: &str, now: Ts) -> io::Result<PathBuf> {
-    let folder = dir.conflicts();
-    fs::create_dir_all(&folder)?;
+/// Writes `"{file stem} - {label} {HHmmss}.json"` in `folder` (created if needed).
+fn write_copy(folder: &Path, data: &Data, file_name: &str, label: &str, now: Ts) -> io::Result<PathBuf> {
+    fs::create_dir_all(folder)?;
     let stem = Path::new(file_name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let path = folder.join(format!("{stem} - conflict {}.json", now.format("%H%M%S")));
+    let path = folder.join(format!("{stem} - {label} {}.json", now.format("%H%M%S")));
     fs::write(&path, serde_json::to_vec_pretty(data).map_err(io::Error::other)?)?;
     Ok(path)
 }
@@ -98,6 +115,19 @@ impl Session {
     /// If the data cannot be read, starts Viewing with `load_error` set and
     /// never takes the lock; polls keep retrying.
     pub fn open(dir: DataDir, user: &str, machine: &str, pid: u32, now: Ts, inst: Instant) -> io::Result<Session> {
+        Self::open_with(dir, user, machine, pid, now, inst, || {})
+    }
+
+    /// `open` with a test hook that runs between the first load and the lock attempt.
+    fn open_with(
+        dir: DataDir,
+        user: &str,
+        machine: &str,
+        pid: u32,
+        now: Ts,
+        inst: Instant,
+        before_acquire: impl FnOnce(),
+    ) -> io::Result<Session> {
         dir.ensure()?;
         let me = LockInfo { user: user.into(), machine: machine.into(), pid, acquired_at: now, heartbeat_at: now };
         let mut s = Session {
@@ -108,6 +138,8 @@ impl Session {
             mode: Mode::Viewing { holder: None },
             revision: 0,
             dirty: false,
+            dirty_since: None,
+            unrescued: false,
             saved_this_session: false,
             changed_at: None,
             failed_at: None,
@@ -120,6 +152,7 @@ impl Session {
             last_poll: inst,
             available_announced: false,
             pending: Vec::new(),
+            rescue_dir: default_rescue_dir(),
         };
         if s.load(false).is_err() {
             return Ok(s);
@@ -128,16 +161,23 @@ impl Session {
             s.mode = Mode::Viewing { holder: s.lock_holder(now).flatten() };
             return Ok(s);
         }
-        match lock::try_acquire(&s.dir.lock_path(), &s.me, now) {
-            Ok(Acquire::Acquired) => s.enter_editing(inst),
-            Ok(Acquire::TookOverStale(prev)) => {
-                s.enter_editing(inst);
-                s.note_takeover(&prev, now);
-                s.pending.push(SessionEvent::TookOverStale(prev));
+        before_acquire();
+        let acquired = match lock::try_acquire(&s.dir.lock_path(), &s.me, now) {
+            Ok(Acquire::HeldBy(h)) => {
+                s.mode = Mode::Viewing { holder: Some(h) };
+                return Ok(s);
             }
-            Ok(Acquire::HeldBy(h)) => s.mode = Mode::Viewing { holder: Some(h) },
+            Ok(a) => a,
             // Unknown lock state: stay Viewing; the next poll decides.
-            Err(_) => {}
+            Err(_) => return Ok(s),
+        };
+        if s.after_acquire(false).is_err() {
+            return Ok(s);
+        }
+        s.enter_editing(inst);
+        if let Acquire::TookOverStale(prev) = acquired {
+            s.note_takeover(&prev, now);
+            s.pending.push(SessionEvent::TookOverStale(prev));
         }
         Ok(s)
     }
@@ -214,6 +254,9 @@ impl Session {
     pub fn tick(&mut self, now: Ts, inst: Instant) -> Vec<SessionEvent> {
         if self.is_editing() {
             self.tick_editing(now, inst);
+            if !self.is_editing() {
+                self.last_poll = inst;
+            }
         } else if inst.saturating_duration_since(self.last_poll) >= POLL_EVERY {
             self.last_poll = inst;
             self.poll(now);
@@ -230,21 +273,19 @@ impl Session {
         if self.newer_schema {
             return Err(io::Error::other(NEWER_SCHEMA));
         }
+        if self.unrescued {
+            // Never start editing over edits that exist only in memory.
+            self.export_unsaved(now).map_err(io::Error::other)?;
+        }
         self.me.acquired_at = now;
         self.me.heartbeat_at = now;
-        let path = self.dir.lock_path();
-        let result = lock::try_acquire(&path, &self.me, now)?;
+        let result = lock::try_acquire(&self.dir.lock_path(), &self.me, now)?;
         if let Acquire::HeldBy(h) = &result {
             self.mode = Mode::Viewing { holder: Some(h.clone()) };
             self.available_announced = false;
             return Ok(result);
         }
-        let refreshed = self.refresh_data(false);
-        if refreshed.is_err() || self.newer_schema {
-            let _ = lock::release(&path, &self.me);
-            refreshed?;
-            return Err(io::Error::other(NEWER_SCHEMA));
-        }
+        self.after_acquire(true)?;
         self.enter_editing(inst);
         if let Acquire::TookOverStale(prev) = &result {
             self.note_takeover(prev, now);
@@ -270,14 +311,16 @@ impl Session {
         }
         match lock::is_owner(&self.dir.lock_path(), &self.me) {
             Ok(true) => {}
-            Ok(false) => return Err(self.conflict(now)),
+            Ok(false) => return Err(self.lose_lock(now)),
             Err(e) => return Err(self.save_failed(now, format!("Could not check the edit lock: {e}"))),
         }
-        self.data.saved_at = now;
-        self.data.saved_by = self.me.user.clone();
+        // Stamped for the write; restored if it fails.
+        let prev_at = std::mem::replace(&mut self.data.saved_at, now);
+        let prev_by = std::mem::replace(&mut self.data.saved_by, self.me.user.clone());
         match snapshot::save_snapshot(&self.dir, &self.data, &self.file_name(now)) {
             Ok(path) => {
                 self.dirty = false;
+                self.dirty_since = None;
                 self.placeholder = false;
                 self.saved_this_session = true;
                 self.changed_at = None;
@@ -286,22 +329,59 @@ impl Session {
                 self.pending.push(SessionEvent::Saved);
                 Ok(path)
             }
-            Err(e) => Err(self.save_failed(now, format!("Could not save: {e}"))),
+            Err(e) => {
+                self.data.saved_at = prev_at;
+                self.data.saved_by = prev_by;
+                Err(self.save_failed(now, format!("Could not save: {e}")))
+            }
         }
     }
 
-    /// Editing: save (so the named file exists) and release. Viewing: nothing.
-    pub fn on_exit(&mut self, now: Ts) {
+    /// Editing: save (so the named file exists) and release. Returns `Err`
+    /// (keeping the lock and the edits) when unsaved edits could not be
+    /// written; the UI then offers Retry or Quit (`abandon`).
+    pub fn on_exit(&mut self, now: Ts) -> Result<(), String> {
         if !self.is_editing() {
-            return;
+            return if self.unrescued { self.export_unsaved(now).map(|_| ()) } else { Ok(()) };
         }
         if self.dirty || !self.saved_this_session {
-            let _ = self.save_now(now);
+            if let Err(msg) = self.save_now(now) {
+                if self.is_editing() || self.unrescued {
+                    return Err(msg);
+                }
+                // Lost the lock but the edits were exported to conflicts.
+                return Ok(());
+            }
+        }
+        let _ = lock::release(&self.dir.lock_path(), &self.me);
+        self.mode = Mode::Viewing { holder: None };
+        Ok(())
+    }
+
+    /// Quit without a proper save: best-effort copy of the current data to the
+    /// local rescue folder, then release the lock (if ours) and go Viewing.
+    /// Returns the rescue file when one was written.
+    pub fn abandon(&mut self, now: Ts) -> Option<PathBuf> {
+        let mut path = None;
+        if self.is_editing() || self.unrescued {
+            let mut copy = self.data.clone();
+            copy.saved_at = now;
+            copy.saved_by = self.me.user.clone();
+            path = write_copy(&self.rescue_dir, &copy, &self.file_name(now), "rescue", now).ok();
+            if path.is_some() {
+                self.unrescued = false;
+            }
         }
         if self.is_editing() {
             let _ = lock::release(&self.dir.lock_path(), &self.me);
             self.mode = Mode::Viewing { holder: None };
         }
+        path
+    }
+
+    #[cfg(test)]
+    fn set_rescue_dir(&mut self, dir: PathBuf) {
+        self.rescue_dir = dir;
     }
 
     fn tick_editing(&mut self, now: Ts, inst: Instant) {
@@ -310,14 +390,15 @@ impl Session {
             // meanwhile is caught by the owner check before every save.
             self.last_heartbeat = inst;
             if let Ok(false) = lock::heartbeat(&self.dir.lock_path(), &self.me, now) {
-                self.lock_lost(now);
+                self.lose_lock(now);
                 return;
             }
         }
         if self.dirty {
+            let overdue = self.dirty_since.is_some_and(|d| elapsed(now, d, AUTOSAVE_MAX_WAIT));
             let due = match (self.failed_at, self.changed_at) {
                 (Some(failed), _) => elapsed(now, failed, SAVE_RETRY),
-                (None, Some(changed)) => elapsed(now, changed, AUTOSAVE_DEBOUNCE),
+                (None, Some(changed)) => overdue || elapsed(now, changed, AUTOSAVE_DEBOUNCE),
                 (None, None) => true,
             };
             if due {
@@ -343,6 +424,9 @@ impl Session {
 
     /// Viewing poll: reload a newer snapshot, then report whether editing is available.
     fn poll(&mut self, now: Ts) {
+        if self.unrescued && self.export_unsaved(now).is_err() {
+            return;
+        }
         if self.refresh_data(false).is_err() || self.newer_schema {
             return;
         }
@@ -368,7 +452,8 @@ impl Session {
         };
         self.load_error = None;
         let Some(loaded) = found else { return Ok(false) };
-        if force || self.placeholder || loaded.data.saved_at > self.data.saved_at {
+        let wanted = force || self.placeholder || loaded.data.saved_at > self.data.saved_at;
+        if wanted && !self.unrescued {
             self.adopt(loaded);
             return Ok(true);
         }
@@ -412,11 +497,28 @@ impl Session {
         }
     }
 
+    /// Right after taking the lock: load again, so edits build on the newest
+    /// snapshot (a peer may have saved since our last load). On failure (or
+    /// newer-schema data) release the lock and stay Viewing.
+    fn after_acquire(&mut self, announce: bool) -> io::Result<()> {
+        let loaded = if announce { self.refresh_data(false) } else { self.load(false).map(|_| ()) };
+        if loaded.is_ok() && !self.newer_schema {
+            return Ok(());
+        }
+        let _ = lock::release(&self.dir.lock_path(), &self.me);
+        self.mode = Mode::Viewing { holder: None };
+        self.available_announced = false;
+        loaded?;
+        Err(io::Error::other(NEWER_SCHEMA))
+    }
+
     fn enter_editing(&mut self, inst: Instant) {
+        debug_assert!(!self.unrescued, "unrescued edits must be exported first");
         self.mode = Mode::Editing;
         self.last_activity = inst;
         self.last_heartbeat = inst;
         self.dirty = false;
+        self.dirty_since = None;
         self.saved_this_session = false;
         self.changed_at = None;
         self.failed_at = None;
@@ -436,6 +538,9 @@ impl Session {
     }
 
     fn mark_dirty(&mut self, now: Ts) {
+        if !self.dirty {
+            self.dirty_since = Some(now);
+        }
         self.dirty = true;
         self.placeholder = false;
         self.changed_at = Some(now);
@@ -453,55 +558,59 @@ impl Session {
         msg
     }
 
-    /// Someone else owns the lock: export our data to the conflicts folder,
-    /// switch to Viewing and show the real latest data. Returns the message.
-    fn conflict(&mut self, now: Ts) -> String {
-        let mut copy = self.data.clone();
-        copy.saved_at = now;
-        copy.saved_by = self.me.user.clone();
-        let written = write_conflict(&self.dir, &copy, &self.file_name(now), now);
+    /// Someone else owns the lock (save-time owner check or heartbeat): switch
+    /// to Viewing; unsaved edits go to the conflicts folder. Returns the message.
+    fn lose_lock(&mut self, now: Ts) -> String {
         self.mode = Mode::Viewing { holder: self.lock_holder(now).flatten() };
         self.available_announced = false;
-        let msg = match written {
-            Ok(path) => {
-                self.dirty = false;
-                self.changed_at = None;
-                self.failed_at = None;
-                self.save_error = None;
-                let msg = format!("Another user has the edit lock; your changes were saved to {}", path.display());
-                self.pending.push(SessionEvent::Conflict(path));
-                self.pending.push(SessionEvent::LeftEditMode(LeaveReason::Conflict));
-                let _ = self.refresh_data(true);
-                return msg;
+        let msg = if self.dirty {
+            match self.export_unsaved(now) {
+                Ok(path) => format!("Another user has the edit lock; your changes were saved to {}", path.display()),
+                Err(msg) => msg,
             }
-            Err(e) => format!("Another user has the edit lock and your changes could not be exported: {e}"),
+        } else {
+            let _ = self.refresh_data(false);
+            "Another user has the edit lock".to_owned()
         };
-        // Keep the unsaved data on screen; it is not reloaded over.
-        self.save_error = Some(msg.clone());
-        self.pending.push(SessionEvent::SaveFailed(msg.clone()));
         self.pending.push(SessionEvent::LeftEditMode(LeaveReason::Conflict));
         msg
     }
 
-    /// The heartbeat found the lock is no longer ours: same as a conflict.
-    /// With nothing unsaved there is nothing to export.
-    fn lock_lost(&mut self, now: Ts) {
-        if self.dirty {
-            self.conflict(now);
-            return;
+    /// Writes the in-memory edits to the conflicts folder. On success emits
+    /// `Conflict` and reloads the real latest data; on failure marks them
+    /// `unrescued` (kept on screen, retried every poll) and emits `SaveFailed`.
+    fn export_unsaved(&mut self, now: Ts) -> Result<PathBuf, String> {
+        let mut copy = self.data.clone();
+        copy.saved_at = now;
+        copy.saved_by = self.me.user.clone();
+        match write_copy(&self.dir.conflicts(), &copy, &self.file_name(now), "conflict", now) {
+            Ok(path) => {
+                self.unrescued = false;
+                self.dirty = false;
+                self.dirty_since = None;
+                self.changed_at = None;
+                self.failed_at = None;
+                self.save_error = None;
+                self.pending.push(SessionEvent::Conflict(path.clone()));
+                let _ = self.refresh_data(true);
+                Ok(path)
+            }
+            Err(e) => {
+                self.unrescued = true;
+                let msg = format!("Another user has the edit lock and your changes could not be exported: {e}");
+                self.save_error = Some(msg.clone());
+                self.pending.push(SessionEvent::SaveFailed(msg.clone()));
+                Err(msg)
+            }
         }
-        self.mode = Mode::Viewing { holder: self.lock_holder(now).flatten() };
-        self.available_announced = false;
-        self.pending.push(SessionEvent::LeftEditMode(LeaveReason::Conflict));
-        let _ = self.refresh_data(false);
     }
 
-    /// Save if needed, release, Viewing. A failed save keeps Editing.
+    /// Save if needed, release, Viewing. A failed save keeps Editing; a lost
+    /// lock whose edits could not be exported is an error too.
     fn leave(&mut self, now: Ts, reason: LeaveReason) -> io::Result<()> {
         if self.dirty || !self.saved_this_session {
             if let Err(msg) = self.save_now(now) {
-                // A conflict has already left edit mode.
-                return if self.is_editing() { Err(io::Error::other(msg)) } else { Ok(()) };
+                return if self.is_editing() || self.unrescued { Err(io::Error::other(msg)) } else { Ok(()) };
             }
         }
         let released = lock::release(&self.dir.lock_path(), &self.me);
@@ -800,7 +909,7 @@ mod tests {
         let ev = s.tick(at(10), clock.at(10));
         assert!(!ev.contains(&SessionEvent::EditingAvailable));
         assert!(s.save_now(at(11)).is_err());
-        s.on_exit(at(12));
+        s.on_exit(at(12)).unwrap();
         assert_eq!(files_in(&dir.snapshots()), vec![path.clone()]);
         assert_eq!(fs::read(&path).unwrap(), before);
     }
@@ -809,16 +918,16 @@ mod tests {
     fn exit_saves_and_releases() {
         let (_t, dir, clock) = setup();
         let mut s = open(&dir, "jtan", 1, &clock);
-        s.on_exit(at(1));
+        s.on_exit(at(1)).unwrap();
         assert!(dir.snapshots().join(FILE).exists());
         assert!(!dir.lock_path().exists());
         // A viewer's exit does nothing.
         let mut a = open(&dir, "agnes", 2, &clock);
         let mut b = open(&dir, "jtan", 3, &clock);
         assert!(a.is_editing() && !b.is_editing());
-        b.on_exit(at(2));
+        b.on_exit(at(2)).unwrap();
         assert!(dir.lock_path().exists());
-        a.on_exit(at(3));
+        a.on_exit(at(3)).unwrap();
         assert!(!dir.lock_path().exists());
     }
 
@@ -883,6 +992,212 @@ mod tests {
         b.tick(at(10), clock.at(10));
         assert!(b.load_error().is_some());
         assert_eq!(b.data().settings.due_soon_days, 45);
+    }
+
+    /// Makes `path` a plain file so writes into it as a folder fail.
+    fn block_dir(path: &Path) {
+        fs::remove_dir_all(path).unwrap();
+        fs::write(path, "not a folder").unwrap();
+    }
+
+    fn unblock_dir(path: &Path) {
+        fs::remove_file(path).unwrap();
+        fs::create_dir_all(path).unwrap();
+    }
+
+    fn has_save_failed(ev: &[SessionEvent]) -> bool {
+        ev.iter().any(|e| matches!(e, SessionEvent::SaveFailed(_)))
+    }
+
+    fn conflict_path(ev: &[SessionEvent]) -> Option<PathBuf> {
+        ev.iter().find_map(|e| match e {
+            SessionEvent::Conflict(p) => Some(p.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn exit_with_failed_save_keeps_editing_then_abandon_rescues() {
+        let (tmp, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        let rescue = tmp.path().join("rescue-base");
+        s.set_rescue_dir(rescue.clone());
+        block_dir(&dir.snapshots());
+        change(&mut s, t0());
+        assert!(s.on_exit(at(1)).is_err());
+        assert!(s.is_editing());
+        assert!(dir.lock_path().exists());
+        let path = s.abandon(at(2)).expect("rescue file");
+        assert_eq!(path, rescue.join("14 Nov 2026 - jtan - rescue 100002.json"));
+        let rescued: Data = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rescued.settings.due_soon_days, 45);
+        assert!(!dir.lock_path().exists());
+        assert!(!s.is_editing());
+    }
+
+    #[test]
+    fn failed_conflict_export_protects_unsaved_edits() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.save_now(t0()).unwrap();
+        let thief = other("agnes", "PC2", 9, t0());
+        write_lock(&dir, &thief);
+        block_dir(&dir.conflicts());
+        change(&mut s, t0());
+        let ev = s.tick(at(3), clock.at(3));
+        assert!(has_save_failed(&ev), "{ev:?}");
+        assert!(ev.contains(&SessionEvent::LeftEditMode(LeaveReason::Conflict)));
+        assert!(!s.is_editing());
+        assert_eq!(s.data().settings.due_soon_days, 45);
+        // Someone else saves newer data: it must not replace our unexported edits.
+        let mut newer = Data::new_empty("agnes", at(5));
+        newer.settings.due_soon_days = 99;
+        save_snapshot(&dir, &newer, "14 Nov 2026 - agnes.json").unwrap();
+        let ev = s.tick(at(13), clock.at(13));
+        assert!(!ev.contains(&SessionEvent::Reloaded), "{ev:?}");
+        assert_eq!(s.data().settings.due_soon_days, 45);
+        // Cannot start editing (which would discard them) or exit cleanly.
+        fs::remove_file(dir.lock_path()).unwrap();
+        assert!(s.start_editing(at(14), clock.at(14)).is_err());
+        assert!(!s.is_editing() && !dir.lock_path().exists());
+        assert!(s.on_exit(at(15)).is_err());
+        // Folder back: the next poll exports, then reloads.
+        unblock_dir(&dir.conflicts());
+        let ev = s.tick(at(23), clock.at(23));
+        let path = conflict_path(&ev).expect("Conflict event");
+        let exported: Data = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(exported.settings.due_soon_days, 45);
+        assert!(ev.contains(&SessionEvent::Reloaded), "{ev:?}");
+        assert_eq!(s.data().settings.due_soon_days, 99);
+        assert!(s.on_exit(at(24)).is_ok());
+    }
+
+    #[test]
+    fn start_editing_retries_failed_export_first() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        write_lock(&dir, &other("agnes", "PC2", 9, t0()));
+        block_dir(&dir.conflicts());
+        change(&mut s, t0());
+        s.tick(at(3), clock.at(3));
+        assert!(!s.is_editing());
+        fs::remove_file(dir.lock_path()).unwrap();
+        unblock_dir(&dir.conflicts());
+        assert_eq!(s.start_editing(at(4), clock.at(4)).unwrap(), Acquire::Acquired);
+        assert_eq!(files_in(&dir.conflicts()).len(), 1);
+        assert!(conflict_path(&s.tick(at(4), clock.at(4))).is_some());
+    }
+
+    #[test]
+    fn stop_editing_errs_when_conflict_export_fails() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        write_lock(&dir, &other("agnes", "PC2", 9, t0()));
+        block_dir(&dir.conflicts());
+        change(&mut s, t0());
+        assert!(s.stop_editing(at(1)).is_err());
+        assert!(!s.is_editing());
+        assert_eq!(s.data().settings.due_soon_days, 45);
+    }
+
+    #[test]
+    fn lock_lost_with_unsaved_edits_and_failed_export_keeps_them() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.save_now(t0()).unwrap();
+        write_lock(&dir, &other("agnes", "PC2", 9, t0()));
+        block_dir(&dir.conflicts());
+        change(&mut s, at(29));
+        let ev = s.tick(at(30), clock.at(30));
+        assert!(has_save_failed(&ev) && !s.is_editing(), "{ev:?}");
+        let mut newer = Data::new_empty("agnes", at(31));
+        newer.settings.due_soon_days = 99;
+        save_snapshot(&dir, &newer, "14 Nov 2026 - agnes.json").unwrap();
+        s.tick(at(40), clock.at(40));
+        assert_eq!(s.data().settings.due_soon_days, 45);
+    }
+
+    #[test]
+    fn clean_lock_loss_writes_no_conflict_file() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.save_now(t0()).unwrap();
+        write_lock(&dir, &other("agnes", "PC2", 9, t0()));
+        assert!(s.save_now(at(1)).is_err());
+        assert!(!s.is_editing());
+        assert!(files_in(&dir.conflicts()).is_empty());
+        let ev = s.tick(at(2), clock.at(2));
+        assert!(ev.contains(&SessionEvent::LeftEditMode(LeaveReason::Conflict)), "{ev:?}");
+        assert!(conflict_path(&ev).is_none());
+    }
+
+    #[test]
+    fn open_reloads_after_acquiring() {
+        let (_t, dir, clock) = setup();
+        dir.ensure().unwrap();
+        save_snapshot(&dir, &Data::new_empty("agnes", t0() - chrono::Duration::days(1)), "old.json").unwrap();
+        let d2 = dir.clone();
+        let s = Session::open_with(dir.clone(), "jtan", "PC1", 1, t0(), clock.at(0), move || {
+            // A peer saves between our load and our lock attempt.
+            let mut newer = Data::new_empty("agnes", t0() - chrono::Duration::hours(1));
+            newer.settings.due_soon_days = 99;
+            save_snapshot(&d2, &newer, "new.json").unwrap();
+        })
+        .unwrap();
+        assert!(s.is_editing());
+        assert_eq!(s.data().settings.due_soon_days, 99);
+    }
+
+    #[test]
+    fn open_falls_back_to_viewing_when_reload_after_acquire_fails() {
+        let (_t, dir, clock) = setup();
+        dir.ensure().unwrap();
+        let blocker = dir.snapshots().join("x.json");
+        let b2 = blocker.clone();
+        let s = Session::open_with(dir.clone(), "jtan", "PC1", 1, t0(), clock.at(0), move || {
+            fs::create_dir(&b2).unwrap();
+        })
+        .unwrap();
+        assert!(!s.is_editing());
+        assert!(s.load_error().is_some());
+        assert!(!dir.lock_path().exists());
+    }
+
+    #[test]
+    fn failed_save_does_not_advance_saved_at() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        let before = s.data().saved_at;
+        block_dir(&dir.snapshots());
+        change(&mut s, t0());
+        assert!(s.save_now(at(5)).is_err());
+        assert_eq!(s.data().saved_at, before);
+    }
+
+    #[test]
+    fn autosave_forced_after_30s_of_continuous_changes() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        for t in (0..30).step_by(2) {
+            change(&mut s, at(t));
+            s.note_activity(clock.at(t as u64));
+            assert!(!s.tick(at(t + 1), clock.at(t as u64 + 1)).contains(&SessionEvent::Saved), "saved at {t}");
+        }
+        change(&mut s, at(30));
+        assert!(s.tick(at(30), clock.at(30)).contains(&SessionEvent::Saved));
+    }
+
+    #[test]
+    fn short_inactivity_timeout_from_settings() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.mutate(t0(), |d, _| d.settings.inactivity_minutes = 2).unwrap();
+        assert_eq!(s.inactivity_timeout(), Duration::from_secs(120));
+        let ev = s.tick(at(59), clock.at(59));
+        assert!(!ev.iter().any(|e| matches!(e, SessionEvent::InactivityWarning { .. })));
+        assert!(s.tick(at(60), clock.at(60)).contains(&SessionEvent::InactivityWarning { secs_left: 60 }));
+        assert!(s.tick(at(120), clock.at(120)).contains(&SessionEvent::LeftEditMode(LeaveReason::Inactivity)));
+        assert!(!dir.lock_path().exists());
     }
 
     #[test]

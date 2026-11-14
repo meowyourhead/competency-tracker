@@ -144,8 +144,9 @@ fn scan(dir: &DataDir) -> io::Result<(Vec<(PathBuf, Data)>, Vec<PathBuf>)> {
         Err(e) => return Err(e),
     };
     let mut paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
+        .map(|e| e.map(|e| e.path()))
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
         .filter(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("json")))
         .collect();
     paths.sort();
