@@ -158,8 +158,11 @@ pub fn propose_merges(sheets: &[RawSheet]) -> Vec<MergeGroup> {
     by_root.values().map(|m| group_of(m)).collect()
 }
 
-/// Every member of `groups[idx]` becomes its own group (keeping the group's
-/// joined date and title, which the user can edit on the review screen).
+/// Every member of `groups[idx]` becomes its own group.
+///
+/// `MergeGroup` keeps no per-member joined date or title, so each split group
+/// inherits the original group's. The review UI MUST let the user edit each
+/// split member's joined date and title before importing.
 pub fn split_group(groups: &mut Vec<MergeGroup>, idx: usize) {
     if groups.get(idx).is_none_or(|g| g.members.len() < 2) {
         return;
@@ -196,8 +199,18 @@ pub struct ImportReport {
     pub notes: usize,
     pub excel_overrides: Vec<String>,
     pub excel_earlier: Vec<String>,
+    /// Excel next-due ignored because the pair has a planned (future) date.
+    pub excel_ignored_planned: Vec<String>,
+    /// Excel next-due ignored because it is a record date + 12·k months, k ≥ 2 (drag-fill).
+    pub excel_ignored_years: Vec<String>,
     pub flagged_stage: Vec<String>,
     pub merges: Vec<String>,
+    /// One line per planned (future, unticked) date.
+    pub planned_dates: Vec<String>,
+    /// Names of staff set to Removed.
+    pub removed: Vec<String>,
+    /// "person – section" unassigned by a remark or cell.
+    pub unassigned: Vec<String>,
 }
 
 impl ImportReport {
@@ -218,8 +231,13 @@ impl ImportReport {
         let lists = [
             ("Excel due dates used (later than calculated)", &self.excel_overrides),
             ("Excel due dates earlier than calculated", &self.excel_earlier),
+            ("Excel due dates ignored (planned date kept)", &self.excel_ignored_planned),
+            ("Excel due dates ignored (looks like +N years)", &self.excel_ignored_years),
             ("Check annual numbering", &self.flagged_stage),
             ("Merged names", &self.merges),
+            ("Planned dates", &self.planned_dates),
+            ("Removed staff", &self.removed),
+            ("Unassigned (person – section)", &self.unassigned),
         ];
         for (title, items) in lists {
             s += &format!("\r\n{title} ({})\r\n", items.len());
@@ -311,42 +329,160 @@ fn token_names_header(token: &str, header_words: &[String]) -> bool {
         || initials == token
 }
 
-/// Annual stage index per test (default 2 = 1st Annual) from ordinal remarks,
-/// and whether some ordinal remark matched no test.
+/// Tokens that never name a test in an ordinal remark.
+const STOPWORDS: [&str; 13] = ["by", "and", "of", "the", "test", "to", "in", "for", "with", "on", "done", "annual", "at"];
+
+fn month_num(w: &str) -> Option<u32> {
+    if !MONTHS.contains(&w) {
+        return None;
+    }
+    MONTHS[..12].iter().position(|m| w.starts_with(m)).map(|i| i as u32 + 1)
+}
+
+/// A date written in a remark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ClauseDate {
+    None,
+    Date(NaiveDate),
+    /// Something date-like that is not a valid date (e.g. "31/06/2025", "Sep 2024").
+    Unparseable,
+}
+
+/// First date in `s`: `d/m/yy`, `d/m/yyyy`, or `d MMM yyyy` (any case, full or short month).
+fn clause_date(s: &str) -> ClauseDate {
+    let mut date_like = false;
+    for chunk in s.split(|c: char| !(c.is_ascii_digit() || c == '/')) {
+        if !chunk.contains('/') || !chunk.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        date_like = true;
+        let parts: Vec<&str> = chunk.split('/').collect();
+        if let [d, m, y] = parts[..] {
+            let year = match y.len() {
+                2 => y.parse::<i32>().ok().map(|y| 2000 + y),
+                4 => y.parse::<i32>().ok(),
+                _ => None,
+            };
+            if let (Some(y), Ok(m), Ok(d)) = (year, m.parse::<u32>(), d.parse::<u32>()) {
+                if let Some(date) = NaiveDate::from_ymd_opt(y, m, d) {
+                    return ClauseDate::Date(date);
+                }
+            }
+        }
+    }
+    let w = words(s);
+    for (i, word) in w.iter().enumerate() {
+        let Some(m) = month_num(word) else { continue };
+        date_like = true;
+        let day = i.checked_sub(1).and_then(|j| w.get(j)).filter(|d| d.len() <= 2).and_then(|d| d.parse::<u32>().ok());
+        let year = w.get(i + 1).filter(|y| y.len() == 4).and_then(|y| y.parse::<i32>().ok());
+        if let (Some(d), Some(y)) = (day, year) {
+            if let Some(date) = NaiveDate::from_ymd_opt(y, m, d) {
+                return ClauseDate::Date(date);
+            }
+        }
+    }
+    if date_like {
+        ClauseDate::Unparseable
+    } else {
+        ClauseDate::None
+    }
+}
+
+/// An ordinal remark clause that names a test.
+#[derive(Debug, Clone, PartialEq)]
+struct OrdinalHit {
+    n: u32,
+    /// The clause's date, else the first date elsewhere in the same remark.
+    date: ClauseDate,
+    clause: String,
+}
+
+/// Ordinal remark hits per test, and whether some ordinal clause matched no test.
 ///
 /// Each `,`/`;` clause with an ordinal applies to the tests its other tokens
 /// name. A token whose matches strictly contain another token's matches is
 /// ignored, so "ABO Manual" picks "ABO Manual" but not "ABO Echo Lumina".
-fn annual_indices(remarks: &[String], headers: &[&str]) -> (Vec<u32>, bool) {
-    let mut idx = vec![2u32; headers.len()];
+fn annual_hits(remarks: &[String], headers: &[&str]) -> (Vec<Vec<OrdinalHit>>, bool) {
+    let mut hits = vec![Vec::new(); headers.len()];
     let header_words: Vec<Vec<String>> = headers.iter().map(|h| words(h)).collect();
     let mut unmatched = false;
-    for clause in remarks.iter().flat_map(|r| r.split([',', ';'])) {
-        let Some(n) = find_ordinal(clause) else { continue };
-        let matches: Vec<BTreeSet<usize>> = words(clause)
-            .into_iter()
-            .filter(|t| {
-                t.chars().count() >= 2
-                    && !["annual", "done", "on"].contains(&t.as_str())
-                    && !MONTHS.contains(&t.as_str())
-                    && !t.starts_with(|c: char| c.is_ascii_digit())
-            })
-            .map(|t| (0..headers.len()).filter(|&i| token_names_header(&t, &header_words[i])).collect())
-            .filter(|m: &BTreeSet<usize>| !m.is_empty())
-            .collect();
-        let mut hit = false;
-        for m in &matches {
-            if matches.iter().any(|o| o.len() < m.len() && o.is_subset(m)) {
-                continue;
+    for remark in remarks {
+        for clause in remark.split([',', ';']) {
+            let Some(n) = find_ordinal(clause) else { continue };
+            let matches: Vec<BTreeSet<usize>> = words(clause)
+                .into_iter()
+                .filter(|t| {
+                    t.chars().count() >= 2
+                        && !STOPWORDS.contains(&t.as_str())
+                        && !MONTHS.contains(&t.as_str())
+                        && !t.starts_with(|c: char| c.is_ascii_digit())
+                })
+                .map(|t| (0..headers.len()).filter(|&i| token_names_header(&t, &header_words[i])).collect())
+                .filter(|m: &BTreeSet<usize>| !m.is_empty())
+                .collect();
+            let date = match clause_date(clause) {
+                ClauseDate::None => clause_date(remark),
+                d => d,
+            };
+            let mut hit = false;
+            for m in &matches {
+                if matches.iter().any(|o| o.len() < m.len() && o.is_subset(m)) {
+                    continue;
+                }
+                for &i in m {
+                    let h = OrdinalHit { n, date, clause: clause.trim().to_string() };
+                    if !hits[i].contains(&h) {
+                        hits[i].push(h);
+                    }
+                    hit = true;
+                }
             }
-            for &i in m {
-                idx[i] = idx[i].max(n + 1);
-                hit = true;
-            }
+            unmatched |= !hit;
         }
-        unmatched |= !hit;
     }
-    (idx, unmatched)
+    (hits, unmatched)
+}
+
+/// How an Annual-row record dated `row` is staged given the ordinal hits for
+/// its test: `(row stage index, extra unconfirmed records (stage, date, clause), flag)`.
+///
+/// - Hit without a date, or dated within tolerance of `row` → relabel the row
+///   record with that ordinal.
+/// - Hit with a past date later than `row` beyond tolerance → keep the row
+///   record (1st Annual, or the annual just before the hit's when it is a year
+///   earlier) and add an unconfirmed record at the hit's date.
+/// - Anything else (future, earlier, unparseable) → leave as is and flag.
+fn resolve_annual(
+    hits: &[OrdinalHit],
+    row: NaiveDate,
+    today: NaiveDate,
+    tol: chrono::Duration,
+) -> (u32, Vec<(u32, NaiveDate, String)>, bool) {
+    let mut relabel: Option<u32> = None;
+    let mut later: Vec<(u32, NaiveDate, String)> = Vec::new();
+    let mut flag = false;
+    for h in hits {
+        match h.date {
+            ClauseDate::None => relabel = relabel.max(Some(h.n)),
+            ClauseDate::Date(d) if (d - row).num_days().abs() <= tol.num_days() => relabel = relabel.max(Some(h.n)),
+            ClauseDate::Date(d) if d <= today && d > row + tol => later.push((h.n + 1, d, h.clause.clone())),
+            _ => flag = true,
+        }
+    }
+    let row_stage = match relabel {
+        Some(n) => n + 1,
+        None => later
+            .iter()
+            .min_by_key(|l| l.0)
+            .filter(|(stage, d, _)| {
+                // The row is the annual just before the hit's if it is a year earlier.
+                *stage >= 3
+                    && row.checked_add_months(chrono::Months::new(12)).is_some_and(|y| (*d - y).num_days().abs() <= tol.num_days())
+            })
+            .map_or(2, |l| l.0 - 1),
+    };
+    (row_stage, later, flag)
 }
 
 /// Everything gathered for one (staff, test) pair across that person's blocks.
@@ -359,6 +495,8 @@ struct PairAcc {
     /// Some block had `-`/`NA`/`N/A` in all three stage rows.
     all_na: bool,
     skipped: BTreeSet<u32>,
+    /// Stage indexes that have a date in some merged block.
+    dated_stages: BTreeSet<u32>,
     planned: Option<NaiveDate>,
     excel_due: Option<NaiveDate>,
 }
@@ -397,6 +535,10 @@ fn push_test(section: &mut Section, name: String) -> Id {
     let order = section.tests.len() as u32;
     section.tests.push(TestSystem { id: id.clone(), name, order, retired: false, rule_id: None });
     id
+}
+
+fn staff_index(staff: &[Staff], id: &str) -> Option<usize> {
+    staff.iter().position(|s| s.id == id)
 }
 
 fn new_staff(name: String, title: String, joined: Option<NaiveDate>) -> Staff {
@@ -507,6 +649,7 @@ pub fn build_import(sheets: &[RawSheet], groups: &[MergeGroup], opts: &ImportOpt
     }
 
     // 3-5. Cells and remarks.
+    let tol = chrono::Duration::days(opts.tolerance_days);
     let mut records = Records { list: Vec::new(), at: HashMap::new() };
     let mut pairs: BTreeMap<(usize, Id), PairAcc> = BTreeMap::new();
     let mut unassigned: HashSet<(usize, usize)> = HashSet::new();
@@ -527,12 +670,15 @@ pub fn build_import(sheets: &[RawSheet], groups: &[MergeGroup], opts: &ImportOpt
                     removed.insert(p);
                 }
             };
-            let (annual, unmatched) = annual_indices(&b.remarks, &headers);
-            if unmatched {
-                let line = format!("{} – {}: check annual numbering", data.staff[p].name, sheet.name);
-                if !report.flagged_stage.contains(&line) {
-                    report.flagged_stage.push(line);
+            let (hits, unmatched) = annual_hits(&b.remarks, &headers);
+            let flag_line = format!("{} – {}: check annual numbering", data.staff[p].name, sheet.name);
+            let flag = |report: &mut ImportReport| {
+                if !report.flagged_stage.contains(&flag_line) {
+                    report.flagged_stage.push(flag_line.clone());
                 }
+            };
+            if unmatched {
+                flag(&mut report);
             }
             for remark in &b.remarks {
                 status_text(remark);
@@ -546,38 +692,61 @@ pub fn build_import(sheets: &[RawSheet], groups: &[MergeGroup], opts: &ImportOpt
                     at: opts.now,
                 });
             }
-            for (ti, t) in sheet.tests.iter().enumerate() {
+            for ti in 0..sheet.tests.len() {
                 let test_id = &test_map[si][ti];
                 let acc = pairs.entry((p, test_id.clone())).or_default();
                 let mut na_stages = Vec::new();
+                let record = |stage: u32, on: NaiveDate, unconfirmed: bool, comment: String| Record {
+                    id: new_id("c"),
+                    staff_id: staff_id.clone(),
+                    test_id: test_id.clone(),
+                    stage_index: stage,
+                    stage_label: stage_label(&rule, stage),
+                    completed_on: on,
+                    comment,
+                    by: IMPORT_BY.into(),
+                    at: opts.now,
+                    imported: true,
+                    unconfirmed,
+                };
                 for (row, cells) in b.stages.iter().enumerate() {
                     let Some(c) = cells.get(ti) else { continue };
-                    let stage = if row == 2 { annual[ti] } else { row as u32 };
+                    let mut stage = row as u32;
                     match &c.cell {
                         Cell::Empty => {}
                         Cell::Date(d) => {
                             acc.any_date = true;
                             if row == 3 {
                                 acc.excel_due = acc.excel_due.max(Some(*d));
-                            } else if c.ticked || *d <= today || t.tick_col.is_none() {
+                            } else if c.ticked || *d <= today {
+                                if row == 2 {
+                                    let (s, extra, flagged) = resolve_annual(&hits[ti], *d, today, tol);
+                                    stage = s;
+                                    if flagged {
+                                        flag(&mut report);
+                                    }
+                                    for (xs, xd, clause) in extra {
+                                        acc.dated_stages.insert(xs);
+                                        records.add(record(xs, xd, true, format!("From remark: {clause}")));
+                                    }
+                                }
                                 acc.stage_date = true;
-                                records.add(Record {
-                                    id: new_id("c"),
-                                    staff_id: staff_id.clone(),
-                                    test_id: test_id.clone(),
-                                    stage_index: stage,
-                                    stage_label: stage_label(&rule, stage),
-                                    completed_on: *d,
-                                    comment: String::new(),
-                                    by: IMPORT_BY.into(),
-                                    at: opts.now,
-                                    imported: true,
-                                    unconfirmed: !c.ticked,
-                                });
+                                acc.dated_stages.insert(stage);
+                                records.add(record(stage, *d, !c.ticked, String::new()));
                             } else {
+                                // Unticked future date (tick column or not): planned.
                                 acc.stage_date = true;
+                                acc.dated_stages.insert(stage);
                                 acc.planned = acc.planned.max(Some(*d));
                                 report.planned += 1;
+                                report.planned_dates.push(format!(
+                                    "{} – {} / {}: {} planned {}",
+                                    data.staff[p].name,
+                                    data.sections[test_info[test_id].0].name,
+                                    test_info[test_id].2,
+                                    stage_label(&rule, stage),
+                                    fmt_date(*d)
+                                ));
                             }
                         }
                         Cell::Text(s) => {
@@ -612,10 +781,28 @@ pub fn build_import(sheets: &[RawSheet], groups: &[MergeGroup], opts: &ImportOpt
             }
         }
     }
+    let mut removed: Vec<usize> = removed.into_iter().collect();
+    removed.sort_unstable();
     for p in removed {
         data.staff[p].status = StaffStatus::Removed;
+        report.removed.push(data.staff[p].name.clone());
+    }
+    let mut unassigned_lines: Vec<&(usize, usize)> = unassigned.iter().collect();
+    unassigned_lines.sort_unstable();
+    for (p, sec) in unassigned_lines {
+        report.unassigned.push(format!("{} – {}", data.staff[*p].name, data.sections[*sec].name));
     }
     data.records = records.list;
+    // Stages that really happened are never skipped.
+    for r in &data.records {
+        if let Some(acc) = staff_index(&data.staff, &r.staff_id).and_then(|p| pairs.get_mut(&(p, r.test_id.clone()))) {
+            acc.dated_stages.insert(r.stage_index);
+        }
+    }
+    for acc in pairs.values_mut() {
+        let dated = acc.dated_stages.clone();
+        acc.skipped.retain(|s| !dated.contains(s));
+    }
 
     // 6. Assignments.
     for ((p, tid), acc) in &pairs {
@@ -653,42 +840,55 @@ pub fn build_import(sheets: &[RawSheet], groups: &[MergeGroup], opts: &ImportOpt
     for r in &data.records {
         by_pair.entry((r.staff_id.as_str(), r.test_id.as_str())).or_default().push(r);
     }
-    let tol = chrono::Duration::days(opts.tolerance_days);
     let mut overrides = Vec::new();
     // Report lines in person, section, test order.
     let mut ordered: Vec<(&(usize, Id), &PairAcc)> = pairs.iter().collect();
     ordered.sort_by_key(|((p, tid), _)| (*p, test_info[tid].0, test_info[tid].1));
     for ((p, tid), acc) in ordered {
-        if acc.is_na() {
+        let (sec, _, test_name) = &test_info[tid];
+        if acc.is_na() || unassigned.contains(&(*p, *sec)) {
             continue;
         }
         let staff = &data.staff[*p];
-        let mut due = acc.planned;
+        let due = acc.planned;
         if let Some(x) = acc.excel_due {
+            let pair_records = by_pair.get(&(staff.id.as_str(), tid.as_str())).cloned().unwrap_or_default();
             let state = PairState {
-                records: by_pair.get(&(staff.id.as_str(), tid.as_str())).cloned().unwrap_or_default(),
+                records: pair_records.clone(),
                 skipped: acc.skipped.iter().copied().collect(),
                 override_: None,
                 assigned_on: staff.assignments.get(tid).map(|a| a.since),
             };
             let computed = next_due(&rule, &state, &data.settings).due_on;
-            let (sec, _, test_name) = &test_info[tid];
             let what = format!("{} – {} / {}", staff.name, data.sections[*sec].name, test_name);
+            let vs = computed.map_or("nothing calculated".to_string(), |c| format!("calculated {}", fmt_date(c)));
+            let line = format!("{what}: Excel {} vs {vs}", fmt_date(x));
             match computed {
-                None => {
-                    due = due.max(Some(x));
-                    report.excel_overrides.push(format!("{what}: Excel {} (nothing calculated)", fmt_date(x)));
+                Some(c) if x < c - tol => report.excel_earlier.push(line),
+                Some(c) if x <= c + tol => {}
+                // Excel is later beyond tolerance, or nothing was calculated.
+                _ => {
+                    // Drag-fill: a record date plus exactly 12·k months, k ≥ 2.
+                    let years = pair_records.iter().find_map(|r| {
+                        (2..=50u32).find(|k| r.completed_on.checked_add_months(chrono::Months::new(12 * k)) == Some(x))
+                    });
+                    if let Some(planned) = acc.planned {
+                        report.excel_ignored_planned.push(format!("{line}; planned {} kept", fmt_date(planned)));
+                    } else if let Some(k) = years {
+                        report.excel_ignored_years.push(format!("{line} (+{k} years from a record)"));
+                    } else {
+                        overrides.push(DueOverride {
+                            staff_id: staff.id.clone(),
+                            test_id: tid.clone(),
+                            due_on: x,
+                            source: OverrideSource::Excel,
+                            by: IMPORT_BY.into(),
+                            at: opts.now,
+                        });
+                        report.excel_overrides.push(line);
+                        continue;
+                    }
                 }
-                Some(c) if x > c + tol => {
-                    due = due.max(Some(x));
-                    report
-                        .excel_overrides
-                        .push(format!("{what}: Excel {} vs calculated {}", fmt_date(x), fmt_date(c)));
-                }
-                Some(c) if x < c - tol => {
-                    report.excel_earlier.push(format!("{what}: Excel {} vs calculated {}", fmt_date(x), fmt_date(c)));
-                }
-                Some(_) => {}
             }
         }
         if let Some(due_on) = due {
@@ -732,6 +932,25 @@ mod tests {
 
     fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    /// Highest ordinal per test as a stage index (2 when none).
+    fn annual_indices(remarks: &[String], headers: &[&str]) -> (Vec<u32>, bool) {
+        let (hits, unmatched) = annual_hits(remarks, headers);
+        (hits.iter().map(|h| h.iter().map(|h| h.n + 1).max().unwrap_or(2)).collect(), unmatched)
+    }
+
+    #[test]
+    fn clause_dates() {
+        assert_eq!(clause_date("DONE on 27 Dec 2023"), ClauseDate::Date(ymd(2023, 12, 27)));
+        assert_eq!(clause_date("on 07 May 2023"), ClauseDate::Date(ymd(2023, 5, 7)));
+        assert_eq!(clause_date("e411 (07/8/2024)"), ClauseDate::Date(ymd(2024, 8, 7)));
+        assert_eq!(clause_date("e411 (16/9/24)"), ClauseDate::Date(ymd(2024, 9, 16)));
+        assert_eq!(clause_date("2 may 2025"), ClauseDate::Date(ymd(2025, 5, 2)));
+        assert_eq!(clause_date("2 September 2025"), ClauseDate::Date(ymd(2025, 9, 2)));
+        assert_eq!(clause_date("(31/06/2025)"), ClauseDate::Unparseable);
+        assert_eq!(clause_date("UM (Sep 2024)"), ClauseDate::Unparseable);
+        assert_eq!(clause_date("2nd UM/u411"), ClauseDate::None);
     }
 
     fn now() -> Ts {
@@ -941,9 +1160,163 @@ mod tests {
         )];
         let p = run(&sheets);
         let r = recs(&p, &staff_id(&p, "Bob"), &test_id(&p, "Molecular Biology", "Test A"));
-        assert_eq!(r.len(), 2, "even a future date is a record when the column has no ticks");
-        assert!(r.iter().all(|r| r.unconfirmed));
-        assert_eq!(p.report.planned, 0);
+        assert_eq!(r.len(), 1, "a future date in a tick-less column is planned, not a record");
+        assert!(r[0].unconfirmed && r[0].completed_on == ymd(2024, 1, 3));
+        assert_eq!(p.report.planned, 1);
+        assert_eq!(p.data.due_overrides.len(), 1);
+        assert_eq!(p.data.due_overrides[0].due_on, ymd(2027, 1, 3));
+        assert_eq!(p.report.planned_dates.len(), 1);
+        assert!(p.report.planned_dates[0].contains("3 Jan 2027"));
+    }
+
+    // ---- Fix round 1 ----
+
+    #[test]
+    fn planned_date_kept_over_later_excel() {
+        let sheets = vec![one_test(
+            "Urinalysis",
+            true,
+            vec![block1(
+                3,
+                "Mashaida",
+                [date(2026, 7, 15, true), empty(), date(2027, 7, 15, false), date(2028, 7, 15, false)],
+            )],
+        )];
+        let p = run(&sheets);
+        assert_eq!(p.data.due_overrides.len(), 1);
+        assert_eq!(p.data.due_overrides[0].due_on, ymd(2027, 7, 15));
+        assert!(p.report.excel_overrides.is_empty(), "{:?}", p.report.excel_overrides);
+        assert_eq!(p.report.excel_ignored_planned.len(), 1);
+        assert!(p.report.excel_ignored_planned[0].contains("15 Jul 2028"));
+        assert!(p.report.to_text().contains("Excel due dates ignored (planned date kept) (1)"));
+    }
+
+    #[test]
+    fn excel_drag_fill_ignored() {
+        // 1st Annual 11 Feb 2026 -> computed 11 Feb 2027; Excel 11 Feb 2028 = record + 24 months.
+        let p = due_case(date(2026, 2, 11, true), ymd(2028, 2, 11));
+        assert!(p.data.due_overrides.is_empty());
+        assert!(p.report.excel_overrides.is_empty());
+        assert_eq!(p.report.excel_ignored_years.len(), 1);
+        assert!(p.report.excel_ignored_years[0].contains("+2 years"), "{:?}", p.report.excel_ignored_years);
+        assert!(p.report.to_text().contains("Excel due dates ignored (looks like +N years) (1)"));
+        // Not an exact multiple: still overrides.
+        let p = due_case(date(2026, 2, 11, true), ymd(2028, 2, 12));
+        assert_eq!(p.data.due_overrides.len(), 1);
+    }
+
+    fn hema_ruby(annual: NaiveDate, remark: &str) -> ImportPlan {
+        let mut b = block1(3, "Frankie", [empty(), empty(), StageCell { cell: Cell::Date(annual), ticked: true }, empty()]);
+        b.remarks = vec![remark.into()];
+        run(&[sheet("Hematology", vec![rt(5, "Cell-DYN Ruby", true, "Hematology")], vec![b])])
+    }
+
+    #[test]
+    fn ordinal_clause_date_matches_row_relabels() {
+        // (a) clause date within tolerance of the Annual-row date.
+        let p = hema_ruby(ymd(2023, 12, 27), "Cell-Dyn Ruby 2nd Annual DONE on 27 Dec 2023");
+        assert_eq!(p.data.records.len(), 1);
+        assert_eq!((p.data.records[0].stage_index, p.data.records[0].stage_label.as_str()), (3, "2nd Annual"));
+        assert!(p.report.flagged_stage.is_empty());
+        // Date in another clause of the same remark (real shape).
+        let mut b = block1(3, "Valerie", [empty(), empty(), date(2025, 5, 2, true), empty()]);
+        b.remarks = vec!["2 may 2025, 2nd annual (u411 & microscopy)".into()];
+        let tests = vec![rt(5, "Urinalysis on cobas u 411 system", true, "Urinalysis")];
+        let p = run(&[sheet("Urinalysis", tests, vec![b])]);
+        assert_eq!(p.data.records.len(), 1);
+        assert_eq!(p.data.records[0].stage_index, 3);
+    }
+
+    #[test]
+    fn ordinal_clause_later_past_date_adds_unconfirmed_record() {
+        // (b) Annual row 5 Dec 2022, remark says 2nd Annual on 27 Dec 2023.
+        let remark = "Cell-Dyn Ruby 2nd Annual DONE on 27 Dec 2023";
+        let p = hema_ruby(ymd(2022, 12, 5), remark);
+        let mut r: Vec<&Record> = p.data.records.iter().collect();
+        r.sort_by_key(|r| r.completed_on);
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0].completed_on, r[0].stage_index, r[0].unconfirmed), (ymd(2022, 12, 5), 2, false));
+        assert_eq!((r[1].completed_on, r[1].stage_index, r[1].unconfirmed), (ymd(2023, 12, 27), 3, true));
+        assert_eq!(r[1].stage_label, "2nd Annual");
+        assert_eq!(r[1].comment, format!("From remark: {remark}"));
+
+        // Urinalysis shape: row Jul 2022, "3rd UM/u411 (2 Sep 2024)" -> row stays 1st Annual.
+        let tests = vec![
+            rt(5, "Urinalysis on cobas u 411 system", true, "Urinalysis"),
+            rt(7, "Urinalysis Microscopy", true, "Urinalysis"),
+        ];
+        let ann = vec![date(2022, 7, 15, true), date(2022, 7, 15, true)];
+        let e2 = || vec![empty(), empty()];
+        let mut b = block(3, "Frankie", [e2(), e2(), ann, e2()]);
+        b.remarks = vec!["3rd UM/u411 (2 Sep 2024)".into()];
+        let p = run(&[sheet("Urinalysis", tests.clone(), vec![b])]);
+        assert_eq!(p.data.records.len(), 4);
+        for r in &p.data.records {
+            let want = if r.completed_on == ymd(2022, 7, 15) { (2, false) } else { (4, true) };
+            assert_eq!((r.stage_index, r.unconfirmed), want, "{r:?}");
+        }
+
+        // Row exactly one year before a 3rd Annual -> the row is the 2nd Annual.
+        let mut b = block(3, "Mashaida", [e2(), e2(), vec![date(2023, 9, 1, true), empty()], e2()]);
+        b.remarks = vec!["3rd UM/u411 (2 Sep 2024)".into()];
+        let p = run(&[sheet("Urinalysis", tests, vec![b])]);
+        let mut r: Vec<&Record> = p.data.records.iter().collect();
+        r.sort_by_key(|r| r.completed_on);
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0].stage_index, r[1].stage_index), (3, 4));
+    }
+
+    #[test]
+    fn ordinal_clause_future_or_unparseable_flags() {
+        // (c) future clause date.
+        let p = hema_ruby(ymd(2025, 5, 2), "Cell-Dyn Ruby 2nd annual 2 may 2027");
+        assert_eq!(p.data.records.len(), 1);
+        assert_eq!(p.data.records[0].stage_index, 2);
+        assert_eq!(p.report.flagged_stage, ["Frankie – Hematology: check annual numbering"]);
+        // (c) date-like text that does not parse.
+        let p = hema_ruby(ymd(2025, 5, 2), "Cell-Dyn Ruby 2nd annual (31/06/2025)");
+        assert_eq!(p.data.records.len(), 1);
+        assert_eq!(p.data.records[0].stage_index, 2);
+        assert_eq!(p.report.flagged_stage.len(), 1);
+    }
+
+    #[test]
+    fn skipped_dropped_when_merged_block_has_that_stage() {
+        let chem = sheet(
+            "Chemistry & Immunology",
+            vec![rt(5, "Abbott Architect", true, "Chemistry & Immunology")],
+            vec![block1(3, "Dan", [date(2024, 1, 1, true), date(2024, 7, 1, true), empty(), empty()])],
+        );
+        let hema = sheet(
+            "Hematology",
+            vec![rt(5, "Abbott Architect", true, "Chemistry & Immunology")],
+            vec![block1(3, "Dan", [date(2024, 1, 1, true), text("-"), text("-"), empty()])],
+        );
+        let p = run(&[chem, hema]);
+        let stages: Vec<u32> = p.data.skipped.iter().map(|s| s.stage_index).collect();
+        assert_eq!(stages, [2], "semi-annual has a real date in Chemistry; only the annual skip stays");
+    }
+
+    #[test]
+    fn unassigned_pair_gets_no_excel_override_and_report_lists() {
+        let mut a = block1(3, "Alice", [date(2024, 7, 2, true), empty(), empty(), date(2027, 1, 1, false)]);
+        a.remarks = vec!["Not assigned to Urinalysis".into()];
+        let mut b = block1(7, "Bob", [date(2024, 7, 2, true), empty(), empty(), empty()]);
+        b.remarks = vec!["Left the company".into()];
+        let p = run(&[one_test("Urinalysis", true, vec![a, b])]);
+        assert!(p.data.due_overrides.is_empty());
+        assert!(p.report.excel_overrides.is_empty());
+        assert_eq!(p.report.unassigned, ["Alice – Urinalysis"]);
+        assert_eq!(p.report.removed, ["Bob"]);
+        let t = p.report.to_text();
+        assert!(t.contains("Removed staff (1)") && t.contains("Unassigned (person – section) (1)"));
+        assert!(t.contains("Planned dates (0)"));
+    }
+
+    #[test]
+    fn ordinal_stopwords_do_not_match() {
+        let (idx, flag) = annual_indices(&["2nd test to HIV".to_string()], &["HIV testing", "Toxicology"]);
+        assert_eq!((idx, flag), (vec![3, 2], false));
     }
 
     #[test]
@@ -1218,8 +1591,7 @@ mod tests {
         let text = p.report.to_text();
         std::fs::create_dir_all("target").unwrap();
         std::fs::write("target/import-report-real.txt", &text).unwrap();
-        println!("blocks={total_blocks}\n{text}");
-        assert!(p.data.staff.len() < total_blocks, "staff {} vs blocks {total_blocks}", p.data.staff.len());
+        println!("blocks={total_blocks}\n{text}");        assert!(p.data.staff.len() < total_blocks, "staff {} vs blocks {total_blocks}", p.data.staff.len());
         assert!(p.data.records.len() > 500, "records = {}", p.data.records.len());
         assert!(!text.trim().is_empty());
     }
