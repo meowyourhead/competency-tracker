@@ -7,3 +7,4 @@ pub mod lock;
 pub mod ops;
 pub mod query;
 pub mod session;
+pub mod import;
