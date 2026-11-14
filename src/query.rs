@@ -128,7 +128,7 @@ pub fn due_items(data: &Data, idx: &Index, today: NaiveDate) -> Vec<DueItem> {
         a.status
             .cmp(&b.status)
             .then_with(|| a.info.due_on.cmp(&b.info.due_on))
-            .then_with(|| a.staff_name.cmp(&b.staff_name))
+            .then_with(|| a.staff_name.to_lowercase().cmp(&b.staff_name.to_lowercase()))
     });
     out
 }
@@ -306,7 +306,7 @@ pub fn search(data: &Data, q: &str, limit: usize) -> Vec<(SearchHit, String)> {
     if tokens.is_empty() {
         return Vec::new();
     }
-    let matcher = SkimMatcherV2::default();
+    let matcher = SkimMatcherV2::default().ignore_case();
     // Every whitespace-separated token must match; scores add up.
     let score = |label: &str| -> Option<i64> {
         tokens.iter().try_fold(0i64, |acc, t| matcher.fuzzy_match(label, t).map(|s| acc + s))
@@ -539,6 +539,7 @@ mod tests {
         assert_eq!(order[3], ("Cara", "Cobas"));
         assert_eq!(items[3].status, DueStatus::OnTrack);
         let rest = &items[4..];
+        assert_eq!(rest.len(), 6);
         assert!(rest.iter().all(|i| i.status == DueStatus::NotStarted));
         let names: Vec<&str> = rest.iter().map(|i| i.staff_name.as_str()).collect();
         let mut sorted = names.clone();
@@ -613,7 +614,9 @@ mod tests {
         assert_eq!(r[0].test_id, "t-h");
 
         let f = DueFilter { test: Some("t-cb".into()), ..Default::default() };
-        assert!(filter_items(&items, &f).iter().all(|i| i.test_id == "t-cb"));
+        let r = filter_items(&items, &f);
+        assert_eq!(r.len(), 5);
+        assert!(r.iter().all(|i| i.test_id == "t-cb"));
 
         let f = DueFilter { status: StatusFilter::Overdue, ..Default::default() };
         assert_eq!(filter_items(&items, &f).len(), 2);
@@ -627,14 +630,22 @@ mod tests {
         assert_eq!(filter_items(&items, &f).len(), 1);
 
         let f = DueFilter { title: Some("senior mlt".into()), ..Default::default() };
-        assert!(filter_items(&items, &f).iter().all(|i| i.staff_id == "p-a"));
+        let r = filter_items(&items, &f);
+        assert_eq!(r.len(), 3);
+        assert!(r.iter().all(|i| i.staff_id == "p-a"));
 
         let f = DueFilter { text: "ARCH".into(), ..Default::default() };
-        assert!(filter_items(&items, &f).iter().all(|i| i.test_name == "Architect"));
+        let r = filter_items(&items, &f);
+        assert_eq!(r.len(), 5);
+        assert!(r.iter().all(|i| i.test_name == "Architect"));
         let f = DueFilter { text: "chem".into(), ..Default::default() };
-        assert!(filter_items(&items, &f).iter().all(|i| i.section_name == "Chemistry"));
+        let r = filter_items(&items, &f);
+        assert_eq!(r.len(), 10);
+        assert!(r.iter().all(|i| i.section_name == "Chemistry"));
         let f = DueFilter { text: "bob".into(), ..Default::default() };
-        assert!(filter_items(&items, &f).iter().all(|i| i.staff_name == "Bob"));
+        let r = filter_items(&items, &f);
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().all(|i| i.staff_name == "Bob"));
         let f = DueFilter { text: "zzz".into(), ..Default::default() };
         assert!(filter_items(&items, &f).is_empty());
     }
@@ -732,6 +743,11 @@ mod tests {
 
         let r = search(&d, "chem", 10);
         assert!(r.contains(&(SearchHit::Section("s-chem".into()), "Chemistry".to_string())));
+
+        let r = search(&d, "CEL DYN", 10);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].1, "Cell-DYN Ruby \u{b7} Haematology");
+        assert_eq!(search(&d, "Alic", 10), vec![(SearchHit::Staff("p-1".into()), "Alice Tan".to_string())]);
 
         assert!(search(&d, "", 10).is_empty());
         assert!(search(&d, "   ", 10).is_empty());
