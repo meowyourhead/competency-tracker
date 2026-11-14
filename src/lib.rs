@@ -4,3 +4,4 @@ pub mod schedule;
 pub mod snapshot;
 pub mod identity;
 pub mod lock;
+pub mod ops;
