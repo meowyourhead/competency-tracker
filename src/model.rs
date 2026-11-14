@@ -14,6 +14,7 @@ pub fn new_id(prefix: &str) -> Id {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub due_soon_days: i64,
     pub variance_tolerance_days: i64,
@@ -246,6 +247,16 @@ impl Data {
         }
     }
 
+    /// Normalises hand-edited or older files so the default rule always resolves.
+    pub fn ensure_valid(&mut self) {
+        if !self.rules.iter().any(|r| r.id == self.default_rule_id) {
+            if !self.rules.iter().any(|r| r.id == "r-global") {
+                self.rules.push(Rule::default_global());
+            }
+            self.default_rule_id = "r-global".into();
+        }
+    }
+
     pub fn staff(&self, id: &str) -> Option<&Staff> {
         self.staff.iter().find(|s| s.id == id)
     }
@@ -350,6 +361,37 @@ mod tests {
         let s = Settings::default();
         assert_eq!((s.due_soon_days, s.variance_tolerance_days, s.inactivity_minutes), (30, 30, 10));
         assert_eq!((s.initial_due_days, s.archive_after_days), (None, None));
+    }
+
+    #[test]
+    fn settings_missing_fields_use_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"due_soon_days": 45}"#).unwrap();
+        assert_eq!(s.due_soon_days, 45);
+        assert_eq!(s.variance_tolerance_days, 30);
+        assert_eq!(s.inactivity_minutes, 10);
+    }
+
+    #[test]
+    fn ensure_valid_restores_default_rule() {
+        let mut d = Data::new_empty("jtan", sample_ts());
+        d.rules.clear();
+        d.default_rule_id = "r-gone".into();
+        d.ensure_valid();
+        assert_eq!(d.default_rule_id, "r-global");
+        assert_eq!(d.rules.len(), 1);
+        assert_eq!(d.rule_for_test("any").id, "r-global");
+
+        let mut d = Data::new_empty("jtan", sample_ts());
+        d.rules.push(Rule { id: "r-x".into(), name: "X".into(), stages: vec![] });
+        d.default_rule_id = "r-x".into();
+        d.ensure_valid();
+        assert_eq!(d.default_rule_id, "r-x");
+        assert_eq!(d.rules.len(), 2);
+
+        let mut d = Data::new_empty("jtan", sample_ts());
+        d.default_rule_id = "r-gone".into();
+        d.ensure_valid();
+        assert_eq!((d.default_rule_id.as_str(), d.rules.len()), ("r-global", 1));
     }
 
     #[test]
