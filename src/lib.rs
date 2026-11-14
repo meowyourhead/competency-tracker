@@ -5,3 +5,4 @@ pub mod snapshot;
 pub mod identity;
 pub mod lock;
 pub mod ops;
+pub mod query;
