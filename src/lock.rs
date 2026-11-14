@@ -99,7 +99,7 @@ pub fn is_stale_at(path: &Path, info: &LockInfo, now: Ts) -> io::Result<bool> {
 
 /// An unparseable lock only counts as stale once its mtime is old; a fresh one
 /// may be a peer between `create_new` and its first write.
-fn corrupt_is_stale(path: &Path) -> io::Result<bool> {
+pub fn corrupt_is_stale(path: &Path) -> io::Result<bool> {
     match mtime_age_secs(path) {
         Ok(age) => Ok(age > STALE_SECS),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),

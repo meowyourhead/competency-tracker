@@ -1,6 +1,7 @@
 ﻿use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::NaiveDate;
 
@@ -88,13 +89,38 @@ pub fn save_snapshot(dir: &DataDir, data: &Data, file_name: &str) -> io::Result<
         f.write_all(&json)?;
         f.sync_all()?;
         drop(f);
-        fs::rename(&tmp, &target)
+        // Windows sharing violations (a reader or sync client holding the
+        // target) surface as PermissionDenied.
+        retry_io(|| fs::rename(&tmp, &target), is_permission_denied)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     result?;
     Ok(target)
+}
+
+const IO_RETRIES: u32 = 3;
+const IO_RETRY_DELAY: Duration = Duration::from_millis(150);
+
+/// Runs `op`, retrying up to `IO_RETRIES` more times (150 ms apart) while
+/// `retry_on` accepts the error. Shared folders often hold files open briefly
+/// (antivirus, sync clients).
+fn retry_io<T>(mut op: impl FnMut() -> io::Result<T>, retry_on: impl Fn(&io::Error) -> bool) -> io::Result<T> {
+    let mut retries = 0;
+    loop {
+        match op() {
+            Err(e) if retries < IO_RETRIES && retry_on(&e) => {
+                retries += 1;
+                std::thread::sleep(IO_RETRY_DELAY);
+            }
+            other => return other,
+        }
+    }
+}
+
+fn is_permission_denied(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::PermissionDenied
 }
 
 #[derive(Debug)]
@@ -106,7 +132,9 @@ pub struct Loaded {
 }
 
 /// Every `*.json` directly in the snapshots folder, parsed. Unparseable files
-/// are returned separately.
+/// are returned separately. A candidate that still cannot be *read* after
+/// retries is an error, so an older snapshot never loads silently in its place;
+/// one that vanished since the listing is skipped.
 fn scan(dir: &DataDir) -> io::Result<(Vec<(PathBuf, Data)>, Vec<PathBuf>)> {
     let mut good = Vec::new();
     let mut corrupt = Vec::new();
@@ -118,17 +146,18 @@ fn scan(dir: &DataDir) -> io::Result<(Vec<(PathBuf, Data)>, Vec<PathBuf>)> {
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("json"))
-        })
+        .filter(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("json")))
         .collect();
     paths.sort();
     for path in paths {
-        let parsed = fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Data>(&b).ok());
-        match parsed {
-            Some(d) => good.push((path, d)),
-            None => corrupt.push(path),
+        let bytes = match retry_io(|| fs::read(&path), |e| e.kind() != io::ErrorKind::NotFound) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
+        };
+        match serde_json::from_slice::<Data>(&bytes) {
+            Ok(d) => good.push((path, d)),
+            Err(_) => corrupt.push(path),
         }
     }
     Ok((good, corrupt))
@@ -266,6 +295,62 @@ mod tests {
         let loaded = load_latest(&dir).unwrap().unwrap();
         assert_eq!(loaded.corrupt, vec![bad]);
         assert_eq!(loaded.data.saved_by, "ok");
+    }
+
+    #[test]
+    fn unreadable_candidate_is_an_error_not_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = dir_in(&tmp);
+        save_snapshot(&dir, &data_at(ts(2026, 11, 10), "older"), "older.json").unwrap();
+        // A *.json path that cannot be read (here: a directory) must not let the
+        // older snapshot load silently.
+        fs::create_dir(dir.snapshots().join("x.json")).unwrap();
+        assert!(load_latest(&dir).is_err());
+        // A parse failure is still just reported as corrupt.
+        fs::remove_dir(dir.snapshots().join("x.json")).unwrap();
+        fs::write(dir.snapshots().join("x.json"), "{ nope").unwrap();
+        let loaded = load_latest(&dir).unwrap().unwrap();
+        assert_eq!(loaded.data.saved_by, "older");
+        assert_eq!(loaded.corrupt, vec![dir.snapshots().join("x.json")]);
+    }
+
+    #[test]
+    fn retry_io_retries_transient_errors() {
+        let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let is_denied = |e: &io::Error| e.kind() == io::ErrorKind::PermissionDenied;
+        // Fails twice, then succeeds.
+        let mut calls = 0;
+        let r = retry_io(
+            || {
+                calls += 1;
+                if calls < 3 { Err(denied()) } else { Ok(7) }
+            },
+            is_denied,
+        );
+        assert_eq!(r.unwrap(), 7);
+        assert_eq!(calls, 3);
+        // Always failing: one try plus three retries, then the error.
+        let mut calls = 0;
+        let r: io::Result<()> = retry_io(
+            || {
+                calls += 1;
+                Err(denied())
+            },
+            is_denied,
+        );
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls, 4);
+        // Errors the predicate rejects are not retried.
+        let mut calls = 0;
+        let r: io::Result<()> = retry_io(
+            || {
+                calls += 1;
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            },
+            is_denied,
+        );
+        assert!(r.is_err());
+        assert_eq!(calls, 1);
     }
 
     #[test]
