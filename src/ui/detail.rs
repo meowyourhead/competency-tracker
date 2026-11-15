@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use chrono::NaiveDate;
 use egui::{
-    Align, Button, ComboBox, Frame, Key, Layout, Margin, Pos2, RichText, ScrollArea, Stroke,
-    TextEdit,
+    Align, Button, Color32, ComboBox, Frame, Key, Layout, Margin, Pos2, RichText, ScrollArea,
+    Stroke, TextEdit,
 };
 use egui_phosphor::regular as icon;
 
@@ -21,7 +21,7 @@ use crate::schedule::{
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{heading, medium, Palette};
 use crate::ui::timeline::{self, stage_chip, stage_color, stage_kind};
-use crate::ui::widgets::{date_picker, due_pill, icon_button};
+use crate::ui::widgets::{date_picker, due_pill, icon_button, section_chip, section_color};
 
 #[derive(Default)]
 pub(crate) enum DetailForm {
@@ -127,14 +127,17 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut DetailState) {
                 cx.pal,
                 "Not found",
                 "This person or test no longer exists.",
+                None,
             );
             return;
         };
+        let color = section_color(data, &sec.id).unwrap_or(cx.pal.muted);
         close = header(
             ui,
             cx.pal,
             &staff.name,
-            &format!("{} \u{b7} {}", test.name, sec.name),
+            &test.name,
+            Some((&sec.name, color)),
         );
         let rule = data.rule_for_test(&test_id);
         let pair = pair_state(data, &staff_id, &test_id);
@@ -223,8 +226,15 @@ fn editing_entry(state: &DetailState) -> bool {
     matches!(state.form, DetailForm::EditRecord { .. })
 }
 
-/// Name and subtitle with the close button; returns true when closed.
-fn header(ui: &mut egui::Ui, pal: &Palette, title: &str, subtitle: &str) -> bool {
+/// Name and subtitle (with the section's chip after it, when given) and the
+/// close button; returns true when closed.
+fn header(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    title: &str,
+    subtitle: &str,
+    section: Option<(&str, Color32)>,
+) -> bool {
     let mut close = false;
     ui.horizontal(|ui| {
         heading(ui, title);
@@ -232,7 +242,13 @@ fn header(ui: &mut egui::Ui, pal: &Palette, title: &str, subtitle: &str) -> bool
             close = icon_button(ui, pal, icon::X, "Close panel").clicked();
         });
     });
-    ui.label(RichText::new(subtitle).color(pal.muted));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(subtitle).color(pal.muted));
+        if let Some((name, color)) = section {
+            section_chip(ui, pal, name, color);
+        }
+    });
     close
 }
 

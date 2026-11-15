@@ -11,7 +11,9 @@ use crate::query::{distinct_audit_users, filter_audit, AuditFilter};
 use crate::session::Session;
 use crate::ui::app::Ctx;
 use crate::ui::theme::Palette;
-use crate::ui::widgets::{chip_select, date_picker, empty_state, search_box, SEARCH_W};
+use crate::ui::widgets::{
+    chip_select, date_picker, empty_state, search_box, section_chip, section_color, SEARCH_W,
+};
 
 /// Height of one list row (two lines of text).
 const ROW_H: f32 = 44.0;
@@ -111,26 +113,34 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut AuditState) {
                 .auto_shrink([false, true])
                 .show_rows(ui, ROW_H, entries.len(), |ui, range| {
                     for e in &entries[range] {
-                        row(ui, pal, e);
+                        row(ui, pal, data, e);
                     }
                 });
         });
 }
 
-fn row(ui: &mut egui::Ui, pal: &Palette, e: &AuditEntry) {
+fn row(ui: &mut egui::Ui, pal: &Palette, data: &Data, e: &AuditEntry) {
     let width = ui.available_width();
+    // The section it concerns, when it names one that still exists.
+    let section = e
+        .refs
+        .get("section_id")
+        .and_then(|id| Some((data.section(id)?, section_color(data, id)?)));
     ui.allocate_ui(Vec2::new(width, ROW_H), |ui| {
         ui.set_min_size(Vec2::new(width, ROW_H));
         ui.spacing_mut().item_spacing.y = 2.0;
         let when = e.at.format("%-d %b %Y %H:%M");
-        ui.add(
-            Label::new(
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(
                 RichText::new(format!("{when} \u{b7} {}", e.by))
                     .size(12.0)
                     .color(pal.muted),
-            )
-            .truncate(),
-        );
+            );
+            if let Some((sec, color)) = section {
+                section_chip(ui, pal, &sec.name, color);
+            }
+        });
         ui.add(Label::new(RichText::new(&e.detail).color(pal.text)).truncate());
     });
 }

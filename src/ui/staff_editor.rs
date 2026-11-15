@@ -12,7 +12,7 @@ use crate::model::{AssignState, Data, Id, Staff};
 use crate::ops::{self, OpError};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{medium, serif};
-use crate::ui::widgets::date_picker;
+use crate::ui::widgets::{date_picker, section_color, section_dot};
 
 /// A dialog in progress. `id` is `None` when adding a person.
 pub(crate) struct StaffForm {
@@ -162,6 +162,9 @@ fn assignments(ui: &mut egui::Ui, data: &Data, form: &mut StaffForm) {
         let id = ui.make_persistent_id(("staff_editor_section", &sec.id));
         CollapsingState::load_with_default_open(ui.ctx(), id, false)
             .show_header(ui, |ui| {
+                if let Some(c) = section_color(data, &sec.id) {
+                    section_dot(ui, c);
+                }
                 ui.label(RichText::new(&sec.name).family(medium()));
                 let mut whole = tests
                     .iter()

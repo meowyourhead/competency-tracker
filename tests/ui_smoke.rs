@@ -482,10 +482,12 @@ fn grid_shows_pill_and_opens_detail() {
     let due = fmt_date(done.checked_add_months(chrono::Months::new(6)).unwrap());
     assert!(h.query_by_label("Bram \u{b7} Architect").is_some());
     assert!(h.query_by_label("Close panel").is_none());
+    let chemistry = h.query_all_by_label("Chemistry").count();
     h.get_by_label("Agnes \u{b7} Cobas").click();
     h.run();
     h.get_by_label("Close panel");
-    h.get_by_label("Cobas \u{b7} Chemistry");
+    // The panel's subtitle names the test, with its section as a chip.
+    assert_eq!(h.query_all_by_label("Chemistry").count(), chemistry + 1);
     // The cell's pill and stage, as the panel shows them.
     h.get_by_label(&due);
     h.get_by_label("for Semi-annual");
@@ -1261,6 +1263,61 @@ fn audit_filter_by_user() {
         "jtan's entry is filtered out"
     );
     h.get_by_label("Added Cara to personnel");
+}
+
+/// History with one entry whose refs name `section_id`.
+fn history_with_section(
+    dir: &tempfile::TempDir,
+    section_id: Option<&str>,
+) -> Harness<'static, TrackerApp> {
+    let mut s = session(dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        let sec = section_id.map_or_else(|| d.sections_sorted()[0].id.clone(), str::to_owned);
+        d.audit.push(competency_tracker::model::AuditEntry {
+            at: now_ts(),
+            by: "jtan".into(),
+            action: "record.add".into(),
+            detail: "Marked Cobas complete for Bob".into(),
+            refs: [("section_id".to_string(), sec)].into(),
+        });
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    button(&h, "History").click();
+    h.run();
+    h
+}
+
+#[test]
+fn history_row_shows_section_chip() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = history_with_section(&dir, None);
+    h.get_by_label("Marked Cobas complete for Bob");
+    h.get_by_label("Chemistry");
+}
+
+#[test]
+fn history_row_deleted_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = history_with_section(&dir, Some("s-gone"));
+    h.get_by_label("Marked Cobas complete for Bob");
+    assert!(h.query_by_label("Chemistry").is_none());
+}
+
+#[test]
+fn detail_subtitle_has_section_chip() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_agnes(&mut h);
+    assert_eq!(h.query_all_by_label("Chemistry").count(), 1, "card heading");
+    h.get_by_label("Cobas").click();
+    h.run();
+    assert_eq!(
+        h.query_all_by_label("Chemistry").count(),
+        2,
+        "plus the panel's chip"
+    );
 }
 
 #[test]

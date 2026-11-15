@@ -5,7 +5,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::NaiveDate;
-use egui::{Align, Button, Frame, Layout, Margin, Modal, Popup, RichText, Stroke, TextEdit, Vec2};
+use egui::{
+    Align, Button, Color32, Frame, Layout, Margin, Modal, Popup, RichText, Stroke, TextEdit, Vec2,
+};
 use egui_phosphor::regular as icon;
 
 use crate::dates::fmt_date;
@@ -19,7 +21,8 @@ use crate::ui::profile;
 use crate::ui::staff_editor::{self, StaffForm};
 use crate::ui::theme::{medium, serif, Palette};
 use crate::ui::widgets::{
-    chip_select, due_pill, due_pill_text, empty_state, icon_button, search_box, segmented, SEARCH_W,
+    chip_select, due_pill, due_pill_text, empty_state, icon_button, paint_section_chip, rgb,
+    search_box, section_chip_width, segmented, SEARCH_W,
 };
 
 #[derive(Default)]
@@ -42,7 +45,7 @@ pub(crate) struct PersonnelState {
 /// What the list shows for one person besides their details.
 struct Summary {
     /// Sections with at least one assigned test.
-    sections: Vec<String>,
+    sections: Vec<(String, Color32)>,
     /// The earliest due pill across their assigned tests.
     next: Option<(DueInfo, DueStatus)>,
 }
@@ -114,7 +117,7 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
         .map(|s| {
             let mut names = Vec::new();
             let mut next: Option<(DueInfo, DueStatus)> = None;
-            for sec in sections.iter().filter(|x| !x.retired) {
+            for (pos, sec) in sections.iter().enumerate().filter(|(_, x)| !x.retired) {
                 let mut any = false;
                 for t in sec
                     .tests
@@ -135,7 +138,7 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
                     }
                 }
                 if any {
-                    names.push(sec.name.clone());
+                    names.push((sec.name.clone(), rgb(sec.color_rgb(pos))));
                 }
             }
             (
@@ -800,21 +803,8 @@ fn filters(
     });
 }
 
-const CHIP_SIZE: f32 = 11.5;
-const CHIP_PAD: i8 = 8;
 const CHIP_GAP: f32 = 6.0;
-
-fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
-    ui.painter()
-        .layout_no_wrap(
-            text.to_owned(),
-            egui::FontId::proportional(CHIP_SIZE),
-            egui::Color32::WHITE,
-        )
-        .size()
-        .x
-        + 2.0 * f32::from(CHIP_PAD)
-}
+const CHIP_H: f32 = 18.0;
 
 /// The Sections column's width: wide enough for everyone's chips on one
 /// line, unless the other columns need the room (then the chips wrap).
@@ -856,11 +846,10 @@ fn sections_width(
     // Checkbox, the row menu, the gaps between seven columns, and some slack.
     let others = 20.0 + name + title + joined + pill + 32.0 + 6.0 * 20.0 + 12.0;
     let chips = widest(&|s| {
-        let names = sums.get(&s.id).map_or(&[][..], |m| m.sections.as_slice());
+        let secs = sums.get(&s.id).map_or(&[][..], |m| m.sections.as_slice());
         // A little slack so rounding never pushes the last chip onto a new line.
-        names
-            .iter()
-            .map(|n| chip_width(ui, n) + CHIP_GAP)
+        secs.iter()
+            .map(|(n, _)| section_chip_width(ui, n) + CHIP_GAP)
             .sum::<f32>()
             + 4.0
     });
@@ -875,32 +864,25 @@ fn sections_width(
 /// The Sections column never gets narrower than this.
 const MIN_SECTIONS_W: f32 = 160.0;
 
-/// Every section the person has tests in, as chips, `width` wide: on one
-/// line when they fit, otherwise on as many lines as they need (each chip
-/// whole). The lines are worked out here, so the row's height is known.
-fn section_chips(ui: &mut egui::Ui, pal: &Palette, names: &[String], width: f32) {
-    if names.is_empty() {
+/// Every section the person has tests in, as chips in their colours,
+/// `width` wide: on one line when they fit, otherwise on as many lines as
+/// they need (each chip whole). The lines are worked out here, so the
+/// row's height is known.
+fn section_chips(ui: &mut egui::Ui, pal: &Palette, secs: &[(String, Color32)], width: f32) {
+    if secs.is_empty() {
         ui.allocate_ui(Vec2::new(width, 0.0), |ui| {
             ui.set_width(width);
             ui.label(RichText::new("\u{2014}").color(pal.muted));
         });
         return;
     }
-    let galleys: Vec<_> = names
+    let widths: Vec<f32> = secs
         .iter()
-        .map(|n| {
-            ui.painter().layout_no_wrap(
-                n.clone(),
-                egui::FontId::proportional(CHIP_SIZE),
-                pal.grey_fg,
-            )
-        })
+        .map(|(n, _)| section_chip_width(ui, n))
         .collect();
-    let chip_w = |g: &std::sync::Arc<egui::Galley>| g.size().x + 2.0 * f32::from(CHIP_PAD);
     let mut lines: Vec<Vec<usize>> = vec![Vec::new()];
     let mut x = 0.0;
-    for (i, g) in galleys.iter().enumerate() {
-        let w = chip_w(g);
+    for (i, &w) in widths.iter().enumerate() {
         let line = lines.last_mut().expect("never empty");
         if !line.is_empty() && x + w > width {
             lines.push(vec![i]);
@@ -910,28 +892,21 @@ fn section_chips(ui: &mut egui::Ui, pal: &Palette, names: &[String], width: f32)
             x += w + CHIP_GAP;
         }
     }
-    let chip_h = galleys[0].size().y + 4.0;
     let line_gap = 5.0;
-    let height = lines.len() as f32 * (chip_h + line_gap) - line_gap;
+    let height = lines.len() as f32 * (CHIP_H + line_gap) - line_gap;
     let (block, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
     for (row, line) in lines.iter().enumerate() {
         let mut x = block.left();
-        let y = block.top() + row as f32 * (chip_h + line_gap);
+        let y = block.top() + row as f32 * (CHIP_H + line_gap);
         for &i in line {
-            let g = galleys[i].clone();
-            let rect = egui::Rect::from_min_size(egui::pos2(x, y), Vec2::new(chip_w(&g), chip_h));
+            let rect = egui::Rect::from_min_size(egui::pos2(x, y), Vec2::new(widths[i], CHIP_H));
             x = rect.right() + CHIP_GAP;
-            if ui.is_rect_visible(rect) {
-                ui.painter().rect_filled(rect, 255, pal.grey_bg);
-                ui.painter()
-                    .galley(rect.center() - g.size() / 2.0, g, pal.grey_fg);
-            }
+            let (name, color) = &secs[i];
+            paint_section_chip(ui, pal, rect, name, *color);
             // Named for screen readers; each chip's place keeps its id unique.
             let id = egui::Id::new(("section_chip", rect.min.x as i32, rect.min.y as i32));
             let resp = ui.interact(rect, id, egui::Sense::hover());
-            resp.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &names[i])
-            });
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name));
         }
     }
 }

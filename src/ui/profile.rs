@@ -100,6 +100,17 @@ pub(crate) fn show(
             {
                 out.edit = true;
             }
+            if !rows.is_empty() {
+                ui.add_space(4.0);
+                let current = usize::from(*cx.profile_view == ProfileView::Table);
+                if let Some(i) = segmented(ui, pal, current, &["Cards", "Table"]) {
+                    *cx.profile_view = if i == 0 {
+                        ProfileView::Cards
+                    } else {
+                        ProfileView::Table
+                    };
+                }
+            }
         });
     });
     let mut bits = Vec::new();
@@ -128,30 +139,15 @@ pub(crate) fn show(
     }
     ui.add_space(12.0);
 
-    // Status strip, with the view toggle on the right.
+    // Status strip; chips wrap whole onto a new line when the page is narrow.
     let n = counts(rows);
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
         for (i, s) in STATUSES.into_iter().enumerate() {
             let on = st.filter == Some(s);
             if status_chip(ui, pal, s, n[i], on).clicked() {
                 st.filter = if on { None } else { Some(s) };
             }
-        }
-        let mut toggle = |ui: &mut egui::Ui| {
-            let current = usize::from(*cx.profile_view == ProfileView::Table);
-            if let Some(i) = segmented(ui, pal, current, &["Cards", "Table"]) {
-                *cx.profile_view = if i == 0 {
-                    ProfileView::Cards
-                } else {
-                    ProfileView::Table
-                };
-            }
-        };
-        if ui.available_width() >= 150.0 {
-            ui.with_layout(Layout::right_to_left(Align::Center), toggle);
-        } else {
-            toggle(ui);
         }
     });
 
@@ -293,40 +289,47 @@ fn next_up_line(
         pal.muted,
     );
     let chip_w = section_chip_width(ui, &r.section_name);
-    let gap = 7.0;
-    let widths = [
-        lead.size().x,
-        name.size().x,
-        chip_w,
-        stage.size().x,
-        tail_g.size().x,
-        arrow.size().x,
+    // The pieces in order; `None` is the section chip.
+    let pieces: Vec<(Option<std::sync::Arc<egui::Galley>>, f32, Color32)> = vec![
+        (Some(lead.clone()), lead.size().x, pal.muted),
+        (Some(name.clone()), name.size().x, pal.text),
+        (None, chip_w, r.color),
+        (Some(stage.clone()), stage.size().x, pal.muted),
+        (Some(tail_g.clone()), tail_g.size().x, fg),
+        (Some(arrow.clone()), arrow.size().x, pal.muted),
     ];
-    let total = widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(total, 22.0), Sense::click());
+    // Flow them, wrapping onto a new line when the page is too narrow.
+    let (gap, line_h) = (7.0, 22.0);
+    let avail = ui.available_width().max(1.0);
+    let mut at = Vec::with_capacity(pieces.len());
+    let (mut x, mut line, mut widest) = (0.0_f32, 0_usize, 0.0_f32);
+    for (_, w, _) in &pieces {
+        if x > 0.0 && x + w > avail {
+            line += 1;
+            x = 0.0;
+        }
+        at.push((x, line));
+        x += w + gap;
+        widest = widest.max(x - gap);
+    }
+    let size = Vec2::new(widest, (line + 1) as f32 * line_h);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
-        let mid = rect.center().y;
-        let mut x = rect.left();
-        let mut put = |g: std::sync::Arc<egui::Galley>, c: Color32| {
-            let w = g.size().x;
-            ui.painter()
-                .galley(egui::pos2(x, mid - g.size().y / 2.0), g, c);
-            x += w + gap;
-        };
-        put(lead, pal.muted);
-        put(name, pal.text);
-        let chip = egui::Rect::from_min_size(egui::pos2(x, mid - 9.0), Vec2::new(chip_w, 18.0));
-        paint_section_chip(ui, pal, chip, &r.section_name, r.color);
-        x += chip_w + gap;
-        let mut put = |g: std::sync::Arc<egui::Galley>, c: Color32| {
-            let w = g.size().x;
-            ui.painter()
-                .galley(egui::pos2(x, mid - g.size().y / 2.0), g, c);
-            x += w + gap;
-        };
-        put(stage, pal.muted);
-        put(tail_g, fg);
-        put(arrow, pal.muted);
+        for ((g, w, c), (x, line)) in pieces.into_iter().zip(at) {
+            let mid = rect.top() + line as f32 * line_h + line_h / 2.0;
+            let left = rect.left() + x;
+            match g {
+                Some(g) => {
+                    ui.painter()
+                        .galley(egui::pos2(left, mid - g.size().y / 2.0), g, c);
+                }
+                None => {
+                    let chip =
+                        egui::Rect::from_min_size(egui::pos2(left, mid - 9.0), Vec2::new(w, 18.0));
+                    paint_section_chip(ui, pal, chip, &r.section_name, c);
+                }
+            }
+        }
     }
     if resp.hovered() {
         ui.painter().hline(
