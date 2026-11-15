@@ -1088,6 +1088,52 @@ fn profile_opens_detail_for_a_test() {
     h.get_by_label("Bram");
 }
 
+fn open_agnes(h: &mut Harness<'static, TrackerApp>) {
+    go_personnel(h);
+    h.get_by_label("Agnes").click();
+    h.run();
+}
+
+#[test]
+fn profile_status_strip_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_agnes(&mut h);
+    h.get_by_label("Overdue 1");
+    h.get_by_label("Due soon 0");
+    h.get_by_label("Up to date 0");
+    h.get_by_label("Not done 0");
+}
+
+#[test]
+fn profile_next_up_opens_detail() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_agnes(&mut h);
+    h.get_by_label_contains("Next up: Cobas").click();
+    h.run();
+    h.get_by_label("Close panel");
+}
+
+#[test]
+fn profile_cards_show_last_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_agnes(&mut h);
+    h.get_by_label_contains("Last done ");
+}
+
+#[test]
+fn profile_cards_narrow_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    h.set_size(egui::vec2(900.0, 800.0));
+    h.run();
+    open_agnes(&mut h);
+    h.get_by_label("Cobas");
+    h.get_by_label("Overdue 1");
+}
+
 fn go_settings_tab(h: &mut Harness<'static, TrackerApp>, tab: &str) {
     button(h, "Settings").click();
     h.run();

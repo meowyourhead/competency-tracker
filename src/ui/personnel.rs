@@ -15,8 +15,9 @@ use crate::query::{distinct_titles, filter_staff, Index, StaffFilter};
 use crate::schedule::{classify, next_due, DueInfo, DueStatus};
 use crate::session::Session;
 use crate::ui::app::{Ctx, Toast};
+use crate::ui::profile;
 use crate::ui::staff_editor::{self, StaffForm};
-use crate::ui::theme::{heading, medium, serif, Palette};
+use crate::ui::theme::{medium, serif, Palette};
 use crate::ui::widgets::{
     chip_select, due_pill, due_pill_text, empty_state, icon_button, search_box, segmented, SEARCH_W,
 };
@@ -28,6 +29,7 @@ pub(crate) struct PersonnelState {
     pub editing: Option<StaffForm>,
     /// Person whose profile is open (also set by search navigation).
     pub profile: Option<Id>,
+    profile_ui: profile::ProfileUi,
     delete: Option<DeleteConfirm>,
     /// People ticked in the list, for batch actions.
     selected: BTreeSet<Id>,
@@ -43,8 +45,6 @@ struct Summary {
     sections: Vec<String>,
     /// The earliest due pill across their assigned tests.
     next: Option<(DueInfo, DueStatus)>,
-    /// Every assigned test's pill: (test id, due, status, delayed).
-    tests: Vec<(Id, DueInfo, DueStatus, bool)>,
 }
 
 struct DeleteConfirm {
@@ -114,7 +114,6 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
         .map(|s| {
             let mut names = Vec::new();
             let mut next: Option<(DueInfo, DueStatus)> = None;
-            let mut tests = Vec::new();
             for sec in sections.iter().filter(|x| !x.retired) {
                 let mut any = false;
                 for t in sec
@@ -129,11 +128,6 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
                         &data.settings,
                     );
                     let status = classify(info.due_on, today, data.settings.due_soon_days);
-                    let delayed = idx
-                        .delay_notes(&s.id, &t.id)
-                        .iter()
-                        .any(|n| n.for_stage_index == info.next_stage_index);
-                    tests.push((t.id.clone(), info.clone(), status, delayed));
                     if info.due_on.is_some()
                         && next.as_ref().is_none_or(|(n, _)| info.due_on < n.due_on)
                     {
@@ -149,7 +143,6 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
                 Summary {
                     sections: names,
                     next,
-                    tests,
                 },
             )
         })
@@ -164,8 +157,13 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) 
     {
         state.profile = None;
     }
-    if state.profile.is_some() {
-        profile(ui, cx, state);
+    if let Some(id) = state.profile.clone() {
+        let out = profile::show(ui, cx, &id, &mut state.profile_ui);
+        if out.back {
+            state.profile = None;
+        } else if out.edit {
+            state.editing = cx.session.data().staff(&id).map(StaffForm::edit);
+        }
     } else {
         list(ui, cx, state);
     }
@@ -1047,124 +1045,5 @@ fn delete_modal(ctx: &egui::Context, cx: &mut Ctx, state: &mut PersonnelState) {
             Some(Err(e)) => d.error = Some(format!("Couldn't delete: {e}")),
             None => d.error = Some("Start editing to make changes".to_owned()),
         }
-    }
-}
-
-/// One person: header, then a card per section listing their tests with pills.
-fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
-    let pal = cx.pal;
-    let editing = cx.session.is_editing();
-    state.refresh(cx.session, cx.today);
-    let data = cx.session.data();
-    let Some(staff) = state.profile.as_deref().and_then(|id| data.staff(id)) else {
-        return;
-    };
-    let tests_due = state
-        .cache
-        .as_ref()
-        .and_then(|(_, _, m)| m.get(&staff.id))
-        .map_or(&[][..], |m| m.tests.as_slice());
-    if ui
-        .add(Button::new(RichText::new("\u{2190} All staff").color(pal.muted)).frame(false))
-        .clicked()
-    {
-        state.profile = None;
-        return;
-    }
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        heading(ui, &staff.name);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let edit = ui.add_enabled(
-                editing,
-                Button::new(format!("{}  Edit", icon::PENCIL_SIMPLE)),
-            );
-            if edit
-                .on_disabled_hover_text("Start editing to make changes")
-                .clicked()
-            {
-                state.editing = Some(StaffForm::edit(staff));
-            }
-        });
-    });
-    let mut bits = Vec::new();
-    if !staff.title.is_empty() {
-        bits.push(staff.title.clone());
-    }
-    if let Some(j) = staff.joined {
-        bits.push(format!("Joined {}", fmt_date(j)));
-    }
-    match staff.status {
-        StaffStatus::Active => {}
-        StaffStatus::Hidden => bits.push("Hidden".to_owned()),
-        StaffStatus::Removed => bits.push("Removed".to_owned()),
-    }
-    ui.label(RichText::new(bits.join(" \u{b7} ")).color(pal.muted));
-    ui.add_space(14.0);
-
-    let mut picked = None;
-    let mut any = false;
-    for sec in data.sections_sorted().into_iter().filter(|s| !s.retired) {
-        let mut tests: Vec<_> = sec
-            .tests
-            .iter()
-            .filter(|t| !t.retired && staff.assignments.contains_key(&t.id))
-            .collect();
-        if tests.is_empty() {
-            continue;
-        }
-        any = true;
-        tests.sort_by_key(|t| t.order);
-        Frame::new()
-            .fill(pal.card)
-            .stroke(Stroke::new(1.0, pal.border))
-            .corner_radius(10)
-            .inner_margin(Margin::symmetric(16, 14))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(&sec.name).strong().size(15.5).color(pal.text));
-                for t in tests {
-                    // The pill first, from the right; the name takes what's
-                    // left and is shortened (in full on hover) when it must be.
-                    ui.horizontal(|ui| {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            match staff.assignments[&t.id].state {
-                                AssignState::Na => {
-                                    ui.label(RichText::new("N/A").color(pal.muted));
-                                }
-                                AssignState::Assigned => {
-                                    if let Some((_, info, status, delayed)) =
-                                        tests_due.iter().find(|(id, ..)| *id == t.id)
-                                    {
-                                        if due_pill(ui, pal, info, *status, *delayed).clicked() {
-                                            picked = Some((staff.id.clone(), t.id.clone()));
-                                        }
-                                    }
-                                }
-                            }
-                            ui.add_space(8.0);
-                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                let name = Button::new(RichText::new(&t.name).color(pal.text))
-                                    .frame(false)
-                                    .wrap_mode(egui::TextWrapMode::Truncate);
-                                if ui.add(name).on_hover_text(&t.name).clicked() {
-                                    picked = Some((staff.id.clone(), t.id.clone()));
-                                }
-                            });
-                        });
-                    });
-                }
-            });
-        ui.add_space(12.0);
-    }
-    if !any {
-        empty_state(
-            ui,
-            "No assignments",
-            "Edit this person to assign test systems.",
-        );
-    }
-    if picked.is_some() {
-        *cx.open_detail = picked;
     }
 }
