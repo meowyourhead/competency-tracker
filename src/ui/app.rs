@@ -14,7 +14,7 @@ use egui_phosphor::regular as icon;
 use crate::dates::now_ts;
 use crate::lock::Acquire;
 use crate::model::{Id, Ts};
-use crate::prefs::{save_prefs_to, Prefs, Theme};
+use crate::prefs::{save_prefs_to, Prefs, ProfileView, Theme};
 use crate::query::{search, SearchHit};
 use crate::session::{LeaveReason, Session, SessionEvent};
 use crate::ui::audit::{self, AuditState};
@@ -200,6 +200,8 @@ pub(crate) struct Ctx<'a> {
     pub open_detail: &'a mut Option<(Id, Id)>,
     /// This computer's display scale (a zoom factor); Settings may change it.
     pub display_scale: &'a mut f32,
+    /// Cards or table on a person's profile (remembered on this computer).
+    pub profile_view: &'a mut ProfileView,
     /// Set to a person's id to open their profile on the Personnel page.
     pub open_profile: &'a mut Option<Id>,
 }
@@ -354,6 +356,7 @@ impl TrackerApp {
         let width = if self.compact_sidebar() { 60.0 } else { 264.0 };
         let detail_w = ((total_w - width) * 0.5).clamp(DETAIL_MIN_W, DETAIL_MAX_W);
         let scale_before = self.prefs.display_scale;
+        let view_before = self.prefs.profile_view;
         Panel::left("sidebar")
             .exact_size(width)
             .resizable(false)
@@ -410,6 +413,7 @@ impl TrackerApp {
                     toasts: &mut self.toasts,
                     open_detail: &mut self.open_detail,
                     display_scale: &mut self.prefs.display_scale,
+                    profile_view: &mut self.prefs.profile_view,
                     open_profile: &mut open_profile,
                 };
                 detail::show(ui, &mut cx, &mut self.detail);
@@ -431,6 +435,7 @@ impl TrackerApp {
                         toasts: &mut self.toasts,
                         open_detail: &mut self.open_detail,
                         display_scale: &mut self.prefs.display_scale,
+                        profile_view: &mut self.prefs.profile_view,
                         open_profile: &mut open_profile,
                     };
                     match self.page {
@@ -453,6 +458,8 @@ impl TrackerApp {
         if self.prefs.display_scale != scale_before {
             // Takes effect from the next frame, laid out afresh at the new size.
             ctx.set_zoom_factor(self.prefs.scale());
+            self.save_prefs();
+        } else if self.prefs.profile_view != view_before {
             self.save_prefs();
         }
         self.show_modal(&ctx, &pal, now, inst);

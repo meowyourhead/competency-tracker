@@ -11,6 +11,15 @@ pub enum Theme {
     Dark,
 }
 
+/// How a person's profile lists their tests.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileView {
+    #[default]
+    Cards,
+    Table,
+}
+
 /// The display scales offered in Settings, as zoom factors.
 pub const DISPLAY_SCALES: [f32; 4] = [0.9, 1.0, 1.2, 1.4];
 
@@ -22,6 +31,7 @@ pub struct Prefs {
     pub sidebar_collapsed: bool,
     /// One of [`DISPLAY_SCALES`]; anything else reads as 100%.
     pub display_scale: f32,
+    pub profile_view: ProfileView,
 }
 
 impl Default for Prefs {
@@ -30,6 +40,7 @@ impl Default for Prefs {
             theme: Theme::default(),
             sidebar_collapsed: false,
             display_scale: 1.0,
+            profile_view: ProfileView::default(),
         }
     }
 }
@@ -86,6 +97,7 @@ mod tests {
             theme: Theme::Dark,
             sidebar_collapsed: true,
             display_scale: 1.2,
+            profile_view: ProfileView::Cards,
         };
         save_prefs_to(&path, &saved).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("\"dark\""));
@@ -131,6 +143,20 @@ mod tests {
         let p = load_prefs_from(&path);
         assert_eq!(p.theme, Theme::Dark);
         assert!(!p.sidebar_collapsed);
+    }
+
+    #[test]
+    fn old_prefs_default_to_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(load_prefs_from(&path).profile_view, ProfileView::Cards);
+        let saved = Prefs {
+            profile_view: ProfileView::Table,
+            ..Prefs::default()
+        };
+        save_prefs_to(&path, &saved).unwrap();
+        assert_eq!(load_prefs_from(&path).profile_view, ProfileView::Table);
     }
 
     #[test]

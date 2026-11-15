@@ -452,6 +452,7 @@ mod tests {
                         toasts: &mut st.toasts,
                         open_detail: &mut st.open,
                         display_scale: &mut 1.0,
+                        profile_view: &mut Default::default(),
                         open_profile: &mut None,
                     };
                     if show(ui, &mut cx, &mut st.wizard) {
