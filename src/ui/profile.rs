@@ -16,8 +16,8 @@ use crate::schedule::{classify, next_due, DueInfo, DueStatus};
 use crate::ui::app::Ctx;
 use crate::ui::theme::{heading, medium, Palette};
 use crate::ui::widgets::{
-    due_pill, empty_state, paint_section_chip, rgb, section_chip_width, section_dot, segmented,
-    status_colors,
+    due_pill, empty_state, paint_section_chip, rgb, section_chip, section_chip_width, section_dot,
+    segmented, status_colors,
 };
 
 /// What the profile keeps between frames.
@@ -169,7 +169,8 @@ pub(crate) fn show(
         empty_state(ui, "Nothing here", "No tests have this status.");
     } else {
         let picked = match *cx.profile_view {
-            ProfileView::Cards | ProfileView::Table => cards(ui, pal, &shown),
+            ProfileView::Cards => cards(ui, pal, &shown),
+            ProfileView::Table => table(ui, pal, &shown, &mut st.sort_by_due),
         };
         if picked.is_some() {
             open = picked;
@@ -340,6 +341,95 @@ fn next_up_line(
     );
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The rows sorted by soonest due; undated after dated, N/A last.
+fn by_due<'a>(rows: &[&'a ProfileRow]) -> Vec<&'a ProfileRow> {
+    let mut v = rows.to_vec();
+    v.sort_by_key(|r| match &r.due {
+        Some((info, ..)) => (0, info.due_on.is_none(), info.due_on),
+        None => (1, true, None),
+    });
+    v
+}
+
+/// The tests as one table. Grouped by section unless sorted by due date.
+/// Returns the test clicked.
+fn table(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    rows: &[&ProfileRow],
+    sort_by_due: &mut bool,
+) -> Option<Id> {
+    let mut picked = None;
+    let ordered = if *sort_by_due {
+        by_due(rows)
+    } else {
+        rows.to_vec()
+    };
+    Frame::new()
+        .fill(pal.card)
+        .stroke(Stroke::new(1.0, pal.border))
+        .corner_radius(10)
+        .inner_margin(Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            // As wide as its columns, so nothing is stranded far to the right.
+            egui::Grid::new("profile_table")
+                .num_columns(4)
+                .spacing([28.0, 8.0])
+                .show(ui, |ui| {
+                    let head = |t: &str| RichText::new(t).color(pal.muted).size(12.5);
+                    ui.label(head("Section"));
+                    ui.label(head("Test"));
+                    ui.label(head("Last done"));
+                    let arrow = if *sort_by_due {
+                        format!("  {}", icon::CARET_DOWN)
+                    } else {
+                        String::new()
+                    };
+                    let tip = if *sort_by_due {
+                        "Group by section"
+                    } else {
+                        "Sort by soonest due"
+                    };
+                    let sort = Button::new(head(&format!("Next due{arrow}"))).frame(false);
+                    if ui.add(sort).on_hover_text(tip).clicked() {
+                        *sort_by_due = !*sort_by_due;
+                    }
+                    ui.end_row();
+                    let mut last_section: Option<&str> = None;
+                    for r in ordered {
+                        let first = last_section != Some(r.section_id.as_str());
+                        last_section = Some(&r.section_id);
+                        if first || *sort_by_due {
+                            section_chip(ui, pal, &r.section_name, r.color);
+                        } else {
+                            ui.label("");
+                        }
+                        // Whole names: the column takes the widest one.
+                        let name =
+                            Button::new(RichText::new(&r.test_name).color(pal.text)).frame(false);
+                        if ui.add(name).clicked() {
+                            picked = Some(r.test_id.clone());
+                        }
+                        match &r.due {
+                            None => {
+                                ui.label(RichText::new("\u{2014}").color(pal.muted));
+                                ui.label(RichText::new("N/A").color(pal.muted));
+                            }
+                            Some((info, status, delayed)) => {
+                                let done = r.last_done.map_or("\u{2014}".to_owned(), fmt_date);
+                                ui.label(RichText::new(done).color(pal.muted));
+                                if due_pill(ui, pal, info, *status, *delayed).clicked() {
+                                    picked = Some(r.test_id.clone());
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    picked
 }
 
 /// Consecutive rows of one section.

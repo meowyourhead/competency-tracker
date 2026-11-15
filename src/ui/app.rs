@@ -280,6 +280,10 @@ impl TrackerApp {
         &self.session
     }
 
+    pub fn prefs(&self) -> &Prefs {
+        &self.prefs
+    }
+
     fn style(&mut self, ctx: &egui::Context) {
         theme::install_fonts(ctx);
         theme::apply(ctx, self.prefs.theme);

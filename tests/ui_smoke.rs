@@ -1134,6 +1134,70 @@ fn profile_cards_narrow_window() {
     h.get_by_label("Overdue 1");
 }
 
+#[test]
+fn profile_table_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_agnes(&mut h);
+    h.get_by_label("Table").click();
+    h.run();
+    h.get_by_label("Last done");
+    h.get_by_label("Cobas").click();
+    h.run();
+    h.get_by_label("Close panel");
+}
+
+#[test]
+fn profile_filter_survives_view_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        let test = |id: &str, name: &str, order| TestSystem {
+            id: id.into(),
+            name: name.into(),
+            order,
+            retired: false,
+            rule_id: None,
+        };
+        d.sections[0].tests = vec![test("t-cobas", "Cobas", 0), test("t-arch", "Architect", 1)];
+        let mut agnes = staff("p-agnes", "Agnes", "MLT", "t-cobas");
+        let since = agnes.assignments["t-cobas"].since;
+        agnes.assignments.insert(
+            "t-arch".into(),
+            Assignment {
+                state: AssignState::Assigned,
+                since,
+            },
+        );
+        d.staff.push(agnes);
+        d.records.push(initial("p-agnes", "t-cobas", 365));
+        d.records.push(initial("p-agnes", "t-arch", 30));
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    open_agnes(&mut h);
+    h.get_by_label("Overdue 1").click();
+    h.run();
+    h.get_by_label("Table").click();
+    h.run();
+    h.get_by_label("Cobas");
+    assert!(h.query_by_label("Architect").is_none(), "filtered out");
+}
+
+#[test]
+fn profile_view_is_remembered() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_agnes(&mut h);
+    h.get_by_label("Table").click();
+    h.run();
+    assert_eq!(
+        h.state().prefs().profile_view,
+        competency_tracker::prefs::ProfileView::Table
+    );
+}
+
 fn go_settings_tab(h: &mut Harness<'static, TrackerApp>, tab: &str) {
     button(h, "Settings").click();
     h.run();
