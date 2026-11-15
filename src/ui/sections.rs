@@ -4,9 +4,11 @@
 
 use chrono::NaiveDate;
 use egui::text::LayoutJob;
+use std::collections::HashMap;
+
 use egui::{
-    Align, Button, CornerRadius, CursorIcon, FontId, Frame, Label, Layout, Margin, Popup, Rect,
-    RichText, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, Vec2, WidgetInfo, WidgetType,
+    Align, Button, Color32, CornerRadius, CursorIcon, FontId, Label, Layout, Popup, Rect, RichText,
+    ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 use egui_phosphor::regular as icon;
 
@@ -16,16 +18,20 @@ use crate::query::{distinct_titles, Index, StatusFilter};
 use crate::schedule::{classify, next_due, DueInfo, DueStatus};
 use crate::session::Session;
 use crate::ui::app::{Ctx, Toast};
-use crate::ui::theme::{heading, medium, Palette};
-use crate::ui::widgets::{chip_select, due_pill, empty_state, search_box};
+use crate::ui::theme::{medium, Palette};
+use crate::ui::widgets::{chip_select, due_pill, empty_state, search_box, segmented};
 
 const NAME_W: f32 = 210.0;
 const COL_W: f32 = 150.0;
 const HEAD_H: f32 = 46.0;
 const ROW_H: f32 = 54.0;
+/// The section band over the column headers of the combined grid.
+const BAND_H: f32 = 30.0;
 
 #[derive(Default)]
 pub(crate) struct SectionsState {
+    /// Every section at once, one grid per section.
+    pub all: bool,
     /// Section shown; `None` (or a retired one) falls back to the first.
     pub section: Option<Id>,
     pub status: StatusFilter,
@@ -36,10 +42,28 @@ pub(crate) struct SectionsState {
     pub text: String,
     /// Rows sorted by this test's due date (earliest first, no date last).
     pub sort_by_test: Option<Id>,
-    /// The grid for (revision, date, section).
-    cache: Option<(u64, NaiveDate, Id, Grid)>,
+    /// Every live section's grid, and all of them as one grouped grid, for
+    /// (revision, date).
+    cache: Option<(u64, NaiveDate, HashMap<Id, Grid>, Combined)>,
 }
 
+/// One section's run of columns in the combined grid.
+struct Group {
+    name: String,
+    color: Color32,
+    /// Its first column in the combined grid, and how many it has.
+    start: usize,
+    len: usize,
+}
+
+/// Every live section in one grid: their columns side by side, grouped by
+/// section in the configured order; one row per person in any of them.
+struct Combined {
+    grid: Grid,
+    groups: Vec<Group>,
+}
+
+#[derive(Clone)]
 enum CellView {
     Due {
         info: DueInfo,
@@ -50,6 +74,7 @@ enum CellView {
     Unassigned,
 }
 
+#[derive(Clone)]
 struct Row {
     id: Id,
     name: String,
@@ -71,24 +96,83 @@ enum GridAction {
 }
 
 impl SectionsState {
-    /// Rebuilds the grid only when the data revision, the date or the section changed.
-    fn refresh(&mut self, session: &Session, today: NaiveDate, section: &Section) {
+    /// Rebuilds the grids only when the data revision or the date changed.
+    fn refresh(&mut self, session: &Session, today: NaiveDate, sections: &[&Section]) {
         let rev = session.revision();
-        if matches!(&self.cache, Some((r, d, s, _)) if *r == rev && *d == today && *s == section.id)
-        {
+        if matches!(&self.cache, Some((r, d, ..)) if *r == rev && *d == today) {
             return;
         }
-        self.cache = Some((
-            rev,
-            today,
-            section.id.clone(),
-            build_grid(session.data(), section, today),
-        ));
+        let data = session.data();
+        let idx = Index::build(data);
+        let grids: HashMap<Id, Grid> = sections
+            .iter()
+            .map(|s| (s.id.clone(), build_grid(data, &idx, s, today)))
+            .collect();
+        let combined = combine(data, sections, &grids);
+        self.cache = Some((rev, today, grids, combined));
     }
 }
 
-fn build_grid(data: &Data, section: &Section, today: NaiveDate) -> Grid {
-    let idx = Index::build(data);
+/// Joins the section grids side by side (see [`Combined`]). A person missing
+/// from a section gets "—" across its columns.
+fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Combined {
+    let all = data.sections_sorted();
+    let mut columns = Vec::new();
+    let mut groups = Vec::new();
+    for s in sections {
+        let g = &grids[&s.id];
+        if g.columns.is_empty() {
+            continue;
+        }
+        let position = all.iter().position(|x| x.id == s.id).unwrap_or(0);
+        groups.push(Group {
+            name: s.name.clone(),
+            color: rgb(s.color_rgb(position)),
+            start: columns.len(),
+            len: g.columns.len(),
+        });
+        columns.extend(g.columns.iter().cloned());
+    }
+    // Everyone in any section, by name.
+    let mut people: Vec<(&str, &str, &str)> = Vec::new();
+    for s in sections {
+        for r in &grids[&s.id].rows {
+            if !people.iter().any(|(id, ..)| *id == r.id) {
+                people.push((&r.id, &r.name, &r.title));
+            }
+        }
+    }
+    people.sort_by_key(|(_, name, _)| name.to_lowercase());
+    let rows = people
+        .into_iter()
+        .map(|(id, name, title)| {
+            let mut cells = Vec::with_capacity(columns.len());
+            for s in sections {
+                let g = &grids[&s.id];
+                match g.rows.iter().find(|r| r.id == id) {
+                    Some(r) => cells.extend(r.cells.iter().cloned()),
+                    None => cells.extend((0..g.columns.len()).map(|_| CellView::Unassigned)),
+                }
+            }
+            Row {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                title: title.to_owned(),
+                cells,
+            }
+        })
+        .collect();
+    Combined {
+        grid: Grid { columns, rows },
+        groups,
+    }
+}
+
+fn rgb(c: u32) -> Color32 {
+    Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> Grid {
     let mut tests: Vec<_> = section.tests.iter().filter(|t| !t.retired).collect();
     tests.sort_by_key(|t| t.order);
     let mut staff: Vec<_> = data
@@ -161,94 +245,33 @@ fn matches_status(cell: &CellView, f: StatusFilter) -> bool {
     }
 }
 
-pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
-    heading(ui, "Sections");
-    ui.add_space(12.0);
-    let pal = cx.pal;
-    let session: &Session = cx.session;
-    let data = session.data();
-    let sections: Vec<&Section> = data
-        .sections_sorted()
-        .into_iter()
-        .filter(|s| !s.retired)
-        .collect();
-    let Some(first) = sections.first() else {
-        empty_state(ui, "No sections", "Add sections in Settings.");
-        return;
-    };
-    let find = |id: Option<&str>| id.and_then(|id| sections.iter().copied().find(|s| s.id == id));
-    let mut section = find(state.section.as_deref()).unwrap_or(first);
-    if let Some(picked) = section_pills(ui, pal, &sections, &section.id) {
-        section = find(Some(&picked)).unwrap_or(section);
-        state.test = None;
-        state.sort_by_test = None;
-    }
-    if state.section.as_deref() != Some(section.id.as_str()) {
-        state.section = Some(section.id.clone());
-    }
-    ui.add_space(12.0);
-    state.refresh(session, cx.today, section);
-    let SectionsState {
-        status,
-        test,
-        title,
-        text,
-        sort_by_test,
-        cache,
-        ..
-    } = state;
-    let grid = &cache.as_ref().expect("refreshed above").3;
-    if test
-        .as_ref()
-        .is_some_and(|t| !grid.columns.iter().any(|(id, _)| id == t))
-    {
-        *test = None;
-    }
-    filters(ui, pal, data, grid, status, test, title, text);
-    ui.add_space(12.0);
-
-    if grid.columns.is_empty() {
-        empty_state(
-            ui,
-            "No test systems",
-            &format!("Add test systems to {} in Settings.", section.name),
-        );
-        return;
-    }
-    if grid.rows.is_empty() {
-        empty_state(
-            ui,
-            "No staff assigned",
-            &format!("Assign staff to {} from Personnel.", section.name),
-        );
-        return;
-    }
+/// The columns and rows of `grid` left by the filters, and the sorted column.
+fn visible(
+    grid: &Grid,
+    test: Option<&Id>,
+    title: Option<&String>,
+    needle: &str,
+    status: StatusFilter,
+    sort_by_test: Option<&Id>,
+) -> (Vec<usize>, Vec<usize>, Option<usize>) {
     let cols: Vec<usize> = (0..grid.columns.len())
-        .filter(|&c| test.as_ref().is_none_or(|t| *t == grid.columns[c].0))
+        .filter(|&c| test.is_none_or(|t| *t == grid.columns[c].0))
         .collect();
-    let needle = text.trim().to_lowercase();
     let mut rows: Vec<usize> = (0..grid.rows.len())
         .filter(|&r| {
             let row = &grid.rows[r];
-            title
-                .as_ref()
-                .is_none_or(|t| t.eq_ignore_ascii_case(&row.title))
-                && (needle.is_empty() || row.name.to_lowercase().contains(&needle))
-                && (*status == StatusFilter::All
-                    || cols.iter().any(|&c| matches_status(&row.cells[c], *status)))
+            // Nobody is listed only for "—" cells (someone outside the
+            // chosen test system, or another section's person).
+            cols.iter()
+                .any(|&c| !matches!(row.cells[c], CellView::Unassigned))
+                && title.is_none_or(|t| t.eq_ignore_ascii_case(&row.title))
+                && (needle.is_empty() || row.name.to_lowercase().contains(needle))
+                && (status == StatusFilter::All
+                    || cols.iter().any(|&c| matches_status(&row.cells[c], status)))
         })
         .collect();
-    if rows.is_empty() {
-        empty_state(
-            ui,
-            "No matches",
-            "Nobody in this section matches these filters.",
-        );
-        return;
-    }
-    let sort_col = sort_by_test
-        .as_ref()
-        .and_then(|t| cols.iter().copied().find(|&c| grid.columns[c].0 == *t));
+    let sort_col =
+        sort_by_test.and_then(|t| cols.iter().copied().find(|&c| grid.columns[c].0 == *t));
     if let Some(c) = sort_col {
         let due = |r: usize| match &grid.rows[r].cells[c] {
             CellView::Due { info, .. } => info.due_on,
@@ -256,17 +279,11 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
         };
         rows.sort_by_key(|&r| (due(r).is_none(), due(r)));
     }
+    (cols, rows, sort_col)
+}
 
-    let action = draw_grid(
-        ui,
-        pal,
-        session.is_editing(),
-        grid,
-        &cols,
-        &rows,
-        sort_col,
-        &section.id,
-    );
+/// Applies what the user did in a grid.
+fn apply_action(cx: &mut Ctx, sort_by_test: &mut Option<Id>, action: Option<GridAction>) {
     match action {
         Some(GridAction::Open(s, t)) => *cx.open_detail = Some((s, t)),
         Some(GridAction::Sort(t)) => {
@@ -291,35 +308,215 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
     }
 }
 
-/// A segmented pill row of the sections; returns the newly picked one.
+pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
+    let pal = cx.pal;
+    let session: &Session = cx.session;
+    let data = session.data();
+    let sections: Vec<&Section> = data
+        .sections_sorted()
+        .into_iter()
+        .filter(|s| !s.retired)
+        .collect();
+    let Some(first) = sections.first() else {
+        empty_state(ui, "No sections", "Add sections in Settings.");
+        return;
+    };
+    let find = |id: Option<&str>| id.and_then(|id| sections.iter().copied().find(|s| s.id == id));
+    let mut section = find(state.section.as_deref()).unwrap_or(first);
+    let current = if state.all {
+        None
+    } else {
+        Some(section.id.as_str())
+    };
+    if let Some(picked) = section_pills(ui, pal, &sections, current) {
+        match picked {
+            None => state.all = true,
+            Some(id) => {
+                state.all = false;
+                section = find(Some(&id)).unwrap_or(section);
+            }
+        }
+        state.test = None;
+        state.sort_by_test = None;
+    }
+    if state.section.as_deref() != Some(section.id.as_str()) {
+        state.section = Some(section.id.clone());
+    }
+    ui.add_space(12.0);
+    state.refresh(session, cx.today, &sections);
+    if state.all {
+        let action = show_all(ui, pal, data, session.is_editing(), &sections, state);
+        apply_action(cx, &mut state.sort_by_test, action);
+        return;
+    }
+    let SectionsState {
+        status,
+        test,
+        title,
+        text,
+        sort_by_test,
+        cache,
+        ..
+    } = state;
+    let grid = &cache.as_ref().expect("refreshed above").2[&section.id];
+    if test
+        .as_ref()
+        .is_some_and(|t| !grid.columns.iter().any(|(id, _)| id == t))
+    {
+        *test = None;
+    }
+    filters(ui, pal, data, &grid.columns, status, test, title, text);
+    ui.add_space(12.0);
+
+    if grid.columns.is_empty() {
+        empty_state(
+            ui,
+            "No test systems",
+            &format!("Add test systems to {} in Settings.", section.name),
+        );
+        return;
+    }
+    if grid.rows.is_empty() {
+        empty_state(
+            ui,
+            "No staff assigned",
+            &format!("Assign staff to {} from Personnel.", section.name),
+        );
+        return;
+    }
+    let needle = text.trim().to_lowercase();
+    let (cols, rows, sort_col) = visible(
+        grid,
+        test.as_ref(),
+        title.as_ref(),
+        &needle,
+        *status,
+        sort_by_test.as_ref(),
+    );
+    if rows.is_empty() {
+        empty_state(
+            ui,
+            "No matches",
+            "Nobody in this section matches these filters.",
+        );
+        return;
+    }
+    let action = draw_grid(
+        ui,
+        pal,
+        session.is_editing(),
+        grid,
+        &cols,
+        &rows,
+        sort_col,
+        &section.id,
+        false,
+        &[],
+    );
+    apply_action(cx, sort_by_test, action);
+}
+
+/// Every section at once, as one table: each section's test systems side by
+/// side under a band in the section's colour, in the configured order, and
+/// one row per person. It fills the page like a single section's grid.
+fn show_all(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    data: &Data,
+    editing: bool,
+    sections: &[&Section],
+    state: &mut SectionsState,
+) -> Option<GridAction> {
+    let SectionsState {
+        status,
+        test,
+        title,
+        text,
+        sort_by_test,
+        cache,
+        ..
+    } = state;
+    let Combined { grid, groups } = &cache.as_ref().expect("refreshed above").3;
+    // Test systems of every section, labelled "test · section".
+    let columns: Vec<(Id, String)> = groups
+        .iter()
+        .flat_map(|g| {
+            grid.columns[g.start..g.start + g.len]
+                .iter()
+                .map(|(id, name)| (id.clone(), format!("{name} \u{b7} {}", g.name)))
+        })
+        .collect();
+    if test
+        .as_ref()
+        .is_some_and(|t| !columns.iter().any(|(id, _)| id == t))
+    {
+        *test = None;
+    }
+    filters(ui, pal, data, &columns, status, test, title, text);
+    ui.add_space(12.0);
+    if grid.columns.is_empty() {
+        let body = if sections.is_empty() {
+            "Add sections in Settings."
+        } else {
+            "Add test systems to your sections in Settings."
+        };
+        empty_state(ui, "No test systems", body);
+        return None;
+    }
+    if grid.rows.is_empty() {
+        empty_state(
+            ui,
+            "No staff assigned",
+            "Assign staff to sections from Personnel.",
+        );
+        return None;
+    }
+    let needle = text.trim().to_lowercase();
+    let (cols, rows, sort_col) = visible(
+        grid,
+        test.as_ref(),
+        title.as_ref(),
+        &needle,
+        *status,
+        sort_by_test.as_ref(),
+    );
+    if rows.is_empty() {
+        empty_state(ui, "No matches", "Nobody matches these filters.");
+        return None;
+    }
+    draw_grid(
+        ui,
+        pal,
+        editing,
+        grid,
+        &cols,
+        &rows,
+        sort_col,
+        "all_sections",
+        false,
+        groups,
+    )
+}
+
+/// A segmented row: "All sections", then each section. Returns the newly
+/// picked one: `Some(None)` for all, `Some(Some(id))` for a section.
 fn section_pills(
     ui: &mut egui::Ui,
     pal: &Palette,
     sections: &[&Section],
-    current: &str,
-) -> Option<Id> {
-    let mut picked = None;
-    Frame::new()
-        .fill(pal.sidebar)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(10)
-        .inner_margin(Margin::same(3))
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for s in sections {
-                    let selected = s.id == current;
-                    if ui
-                        .add(Button::selectable(selected, s.name.as_str()).corner_radius(8))
-                        .clicked()
-                        && !selected
-                    {
-                        picked = Some(s.id.clone());
-                    }
-                }
-            });
-        });
-    picked
+    current: Option<&str>,
+) -> Option<Option<Id>> {
+    let mut labels = vec!["All sections"];
+    labels.extend(sections.iter().map(|s| s.name.as_str()));
+    let at = current
+        .and_then(|id| sections.iter().position(|s| s.id == id))
+        .map_or(0, |i| i + 1);
+    match segmented(ui, pal, at, &labels) {
+        Some(i) if i == at => None,
+        Some(0) => Some(None),
+        Some(i) => Some(Some(sections[i - 1].id.clone())),
+        None => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -327,7 +524,7 @@ fn filters(
     ui: &mut egui::Ui,
     pal: &Palette,
     data: &Data,
-    grid: &Grid,
+    columns: &[(Id, String)],
     status: &mut StatusFilter,
     test: &mut Option<Id>,
     title: &mut Option<String>,
@@ -351,7 +548,7 @@ fn filters(
         if chip_select(ui, "Status", &mut chosen, &statuses) {
             *status = chosen.unwrap_or_default();
         }
-        chip_select(ui, "Test system", test, &grid.columns);
+        chip_select(ui, "Test system", test, columns);
         chip_select(ui, "Title", title, &titles);
         let any = *status != StatusFilter::All
             || test.is_some()
@@ -383,18 +580,45 @@ fn draw_grid(
     rows: &[usize],
     sort_col: Option<usize>,
     section_id: &str,
+    // As tall as its rows (scrolling sideways only), for stacking on one page.
+    fit: bool,
+    // Section column groups (the combined grid); empty for one section.
+    groups: &[Group],
 ) -> Option<GridAction> {
     let mut action = None;
+    let band = if groups.is_empty() { 0.0 } else { BAND_H };
+    let head_h = HEAD_H + band;
+    // Runs of visible columns per group: (group, first visible j, end j).
+    let mut runs: Vec<(&Group, usize, usize)> = Vec::new();
+    for (j, &c) in cols.iter().enumerate() {
+        let Some(g) = groups
+            .iter()
+            .find(|g| (g.start..g.start + g.len).contains(&c))
+        else {
+            continue;
+        };
+        match runs.last_mut() {
+            Some((last, _, end)) if std::ptr::eq(*last, g) && *end == j => *end = j + 1,
+            _ => runs.push((g, j, j + 1)),
+        }
+    }
     let avail = ui.available_rect_before_wrap();
     let content = Vec2::new(cols.len() as f32 * COL_W, rows.len() as f32 * ROW_H);
     let bar = ui.spacing().scroll.allocated_width();
-    let size = Vec2::new(
-        (NAME_W + content.x + bar).min(avail.width()),
-        (HEAD_H + content.y + bar)
+    let height = if fit {
+        let sideways = NAME_W + content.x + 2.0 > avail.width();
+        head_h + content.y + 2.0 + if sideways { bar } else { 0.0 }
+    } else {
+        (head_h + content.y + bar)
             .min(avail.height())
-            .max(HEAD_H + 2.0 * ROW_H),
-    );
-    let outer = Rect::from_min_size(avail.min, size);
+            .max(head_h + 2.0 * ROW_H)
+    };
+    let width = if fit {
+        (NAME_W + content.x + 2.0).min(avail.width())
+    } else {
+        (NAME_W + content.x + bar).min(avail.width())
+    };
+    let outer = Rect::from_min_size(avail.min, Vec2::new(width, height));
     ui.allocate_rect(outer, Sense::hover());
     ui.painter().rect(
         outer,
@@ -405,20 +629,25 @@ fn draw_grid(
     );
     let header = Rect::from_min_max(
         outer.min + Vec2::new(NAME_W, 0.0),
-        egui::pos2(outer.right(), outer.top() + HEAD_H),
+        egui::pos2(outer.right(), outer.top() + head_h),
     );
     let names = Rect::from_min_max(
-        outer.min + Vec2::new(0.0, HEAD_H),
+        outer.min + Vec2::new(0.0, head_h),
         egui::pos2(outer.left() + NAME_W, outer.bottom()),
     );
-    let body = Rect::from_min_max(outer.min + Vec2::new(NAME_W, HEAD_H), outer.max);
+    let body = Rect::from_min_max(outer.min + Vec2::new(NAME_W, head_h), outer.max);
 
     // The wheel over the header or the name column scrolls the cells too.
     let offset_key = ui.id().with(("grid_offset", section_id));
-    let mut area = ScrollArea::both()
-        .id_salt(("grid_scroll", section_id))
-        .auto_shrink(false);
-    if ui.rect_contains_pointer(header) || ui.rect_contains_pointer(names) {
+    let mut area = if fit {
+        ScrollArea::horizontal()
+    } else {
+        ScrollArea::both()
+    }
+    .id_salt(("grid_scroll", section_id))
+    .auto_shrink(false);
+    // A stacked grid leaves vertical wheel movement to the page.
+    if !fit && (ui.rect_contains_pointer(header) || ui.rect_contains_pointer(names)) {
         let delta = ui.input(|i| i.smooth_scroll_delta);
         if delta != Vec2::ZERO {
             ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
@@ -434,6 +663,20 @@ fn draw_grid(
     );
     let out = area.show_viewport(&mut body_ui, |ui, viewport| {
         let origin = ui.max_rect().min;
+        // A faint wash of each section's colour down its columns, and a
+        // divider in its colour where one section ends and the next begins.
+        for (k, (g, j0, j1)) in runs.iter().enumerate() {
+            let x0 = origin.x + *j0 as f32 * COL_W;
+            let x1 = origin.x + *j1 as f32 * COL_W;
+            let y = (origin.y + viewport.top())..=(origin.y + viewport.bottom());
+            let wash = Rect::from_x_y_ranges(x0..=x1, y.clone());
+            ui.painter()
+                .rect_filled(wash, 0, g.color.gamma_multiply(0.05));
+            if k > 0 {
+                ui.painter()
+                    .vline(x0, y, Stroke::new(1.5, g.color.gamma_multiply(0.55)));
+            }
+        }
         let first = (viewport.top() / ROW_H).floor().max(0.0) as usize;
         let last = ((viewport.bottom() / ROW_H).ceil() as usize).min(rows.len());
         for (i, &r) in rows.iter().enumerate().take(last).skip(first) {
@@ -455,11 +698,68 @@ fn draw_grid(
 
     // Header strip.
     let hp = ui.painter_at(header);
+    // Section bands: a solid edge in the section's colour over a tint, and
+    // its name, which slides along to stay in view while the band is.
+    for (k, (g, j0, j1)) in runs.iter().enumerate() {
+        let x0 = header.left() + 1.0 + *j0 as f32 * COL_W - offset.x;
+        let x1 = header.left() + 1.0 + *j1 as f32 * COL_W - offset.x;
+        let rect = Rect::from_min_max(
+            egui::pos2(x0, header.top()),
+            egui::pos2(x1, header.top() + band),
+        );
+        if !rect.intersects(header) {
+            continue;
+        }
+        hp.rect_filled(
+            Rect::from_min_max(rect.min, egui::pos2(rect.right(), header.top() + head_h)),
+            0,
+            g.color.gamma_multiply(0.10),
+        );
+        hp.rect_filled(
+            Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 3.0)),
+            0,
+            g.color,
+        );
+        if k > 0 {
+            hp.vline(
+                x0,
+                header.top()..=header.top() + head_h,
+                Stroke::new(1.5, g.color.gamma_multiply(0.55)),
+            );
+        }
+        let galley =
+            ui.painter()
+                .layout_no_wrap(g.name.clone(), FontId::new(13.0, medium()), pal.text);
+        let dot_w = 14.0;
+        let need = dot_w + galley.size().x;
+        let left = (rect.left().max(header.left()) + 12.0).min(rect.right() - need - 12.0);
+        let left = left.max(rect.left() + 12.0);
+        let mid = rect.top() + 3.0 + (band - 3.0) / 2.0;
+        let clip = hp.with_clip_rect(rect.intersect(header));
+        clip.circle_filled(egui::pos2(left + 4.0, mid), 4.0, g.color);
+        clip.galley(
+            egui::pos2(left + dot_w, mid - galley.size().y / 2.0),
+            galley,
+            pal.text,
+        );
+        let n = j1 - j0;
+        let count = if n == 1 {
+            "1 test".to_owned()
+        } else {
+            format!("{n} tests")
+        };
+        let resp = ui.interact(
+            rect.intersect(header),
+            ui.id().with(("grid_band", section_id, &g.name)),
+            Sense::hover(),
+        );
+        resp.on_hover_text(format!("{} \u{b7} {count}", g.name));
+    }
     for (j, &c) in cols.iter().enumerate() {
         let rect = Rect::from_min_size(
             egui::pos2(
                 header.left() + 1.0 + j as f32 * COL_W - offset.x,
-                header.top(),
+                header.top() + band,
             ),
             Vec2::new(COL_W, HEAD_H),
         );
@@ -551,10 +851,17 @@ fn draw_grid(
 
     // Corner and dividers.
     let corner = Rect::from_min_max(
-        outer.min,
-        egui::pos2(outer.left() + NAME_W, outer.top() + HEAD_H),
+        outer.min + Vec2::new(0.0, band),
+        egui::pos2(outer.left() + NAME_W, outer.top() + head_h),
     );
     let p = ui.painter();
+    if band > 0.0 {
+        p.hline(
+            corner.x_range(),
+            outer.top() + band,
+            Stroke::new(1.0, pal.border),
+        );
+    }
     p.text(
         egui::pos2(corner.left() + 16.0, corner.center().y),
         egui::Align2::LEFT_CENTER,

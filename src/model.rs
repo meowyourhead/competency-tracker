@@ -18,7 +18,10 @@ pub fn new_id(prefix: &str) -> Id {
 pub struct Settings {
     pub due_soon_days: i64,
     pub variance_tolerance_days: i64,
+    /// Idle time before the "Still editing?" prompt opens.
     pub inactivity_minutes: i64,
+    /// How long the prompt waits for "Continue editing" before editing stops.
+    pub inactivity_grace_minutes: i64,
     pub initial_due_days: Option<i64>,
     pub archive_after_days: Option<i64>,
 }
@@ -28,7 +31,8 @@ impl Default for Settings {
         Settings {
             due_soon_days: 30,
             variance_tolerance_days: 30,
-            inactivity_minutes: 10,
+            inactivity_minutes: 15,
+            inactivity_grace_minutes: 15,
             initial_due_days: None,
             archive_after_days: None,
         }
@@ -95,6 +99,43 @@ pub struct Section {
     pub order: u32,
     pub retired: bool,
     pub tests: Vec<TestSystem>,
+    /// `"#RRGGBB"`; `None` uses the default colour for the section's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// The colours sections get by position until one is picked in Settings.
+/// Mid-tone, so they read as tints on light and dark backgrounds alike.
+pub const SECTION_COLORS: [u32; 8] = [
+    0x3E8E7E, // teal
+    0x5B6CC9, // indigo
+    0xC98B2B, // ochre
+    0xB8527A, // rose
+    0x6E8F3A, // moss
+    0x3D7EA6, // lake
+    0x8A5CB0, // plum
+    0xB0623A, // rust
+];
+
+/// Parses `"#RRGGBB"` (or `"RRGGBB"`).
+pub fn parse_hex_color(s: &str) -> Option<u32> {
+    let s = s.trim().trim_start_matches('#');
+    (s.len() == 6).then(|| u32::from_str_radix(s, 16).ok())?
+}
+
+pub fn fmt_hex_color(rgb: u32) -> String {
+    format!("#{:06X}", rgb & 0xFF_FFFF)
+}
+
+impl Section {
+    /// The section's colour as `0xRRGGBB`: its own, else the default for
+    /// `position` (its place among the sorted sections).
+    pub fn color_rgb(&self, position: usize) -> u32 {
+        self.color
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(SECTION_COLORS[position % SECTION_COLORS.len()])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +290,7 @@ impl Data {
             order: i as u32,
             retired: false,
             tests: vec![],
+            color: None,
         })
         .collect();
         Data {
@@ -416,8 +458,9 @@ mod tests {
                 s.variance_tolerance_days,
                 s.inactivity_minutes
             ),
-            (30, 30, 10)
+            (30, 30, 15)
         );
+        assert_eq!(s.inactivity_grace_minutes, 15);
         assert_eq!((s.initial_due_days, s.archive_after_days), (None, None));
     }
 
@@ -426,7 +469,21 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"due_soon_days": 45}"#).unwrap();
         assert_eq!(s.due_soon_days, 45);
         assert_eq!(s.variance_tolerance_days, 30);
-        assert_eq!(s.inactivity_minutes, 10);
+        assert_eq!(s.inactivity_minutes, 15);
+        assert_eq!(s.inactivity_grace_minutes, 15);
+    }
+
+    #[test]
+    fn section_colors_parse_and_fall_back() {
+        assert_eq!(parse_hex_color("#3E8E7E"), Some(0x3E8E7E));
+        assert_eq!(parse_hex_color("3e8e7e"), Some(0x3E8E7E));
+        assert_eq!(parse_hex_color("#xyz"), None);
+        assert_eq!(fmt_hex_color(0x0A0B0C), "#0A0B0C");
+        let mut d = Data::new_empty("jtan", sample_ts());
+        assert_eq!(d.sections[1].color_rgb(1), SECTION_COLORS[1]);
+        assert_eq!(d.sections[0].color_rgb(9), SECTION_COLORS[1]);
+        d.sections[0].color = Some("#112233".into());
+        assert_eq!(d.sections[0].color_rgb(0), 0x112233);
     }
 
     #[test]

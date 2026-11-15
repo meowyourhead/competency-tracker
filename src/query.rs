@@ -421,7 +421,12 @@ pub fn filter_staff<'a>(data: &'a Data, f: &StaffFilter) -> Vec<&'a Staff> {
     let mut out: Vec<&Staff> = data
         .staff
         .iter()
-        .filter(|s| s.status == status)
+        // Hidden is no longer offered; staff hidden earlier are listed with
+        // the removed ones so they can still be restored.
+        .filter(|s| {
+            s.status == status
+                || (status == StaffStatus::Removed && s.status == StaffStatus::Hidden)
+        })
         .filter(|s| {
             f.title
                 .as_ref()
@@ -997,6 +1002,14 @@ mod tests {
                 ..Default::default()
             }),
             ["Hal"]
+        );
+        assert_eq!(
+            names(&StaffFilter {
+                status: Some(StaffStatus::Removed),
+                ..Default::default()
+            }),
+            ["Hal"],
+            "staff hidden earlier are listed with the removed"
         );
         assert_eq!(
             names(&StaffFilter {

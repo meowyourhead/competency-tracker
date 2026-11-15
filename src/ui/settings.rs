@@ -14,7 +14,8 @@ use crate::model::Data;
 use crate::ops::{Actor, OpError};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::import_wizard::{self, ImportWizard};
-use crate::ui::theme::{heading, medium, Palette};
+use crate::ui::theme::{medium, Palette};
+use crate::ui::widgets::segmented;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsTab {
@@ -70,8 +71,6 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SettingsState) {
         }
         return;
     }
-    heading(ui, "Settings");
-    ui.add_space(12.0);
     tabs(ui, cx.pal, &mut state.tab);
     if !cx.session.is_editing() {
         ui.add_space(4.0);
@@ -93,24 +92,11 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SettingsState) {
 }
 
 fn tabs(ui: &mut egui::Ui, pal: &Palette, tab: &mut SettingsTab) {
-    Frame::new()
-        .fill(pal.sidebar)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(10)
-        .inner_margin(Margin::same(3))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for t in SettingsTab::ALL {
-                    if ui
-                        .add(Button::selectable(*tab == t, t.label()).corner_radius(8))
-                        .clicked()
-                    {
-                        *tab = t;
-                    }
-                }
-            });
-        });
+    let labels = SettingsTab::ALL.map(SettingsTab::label);
+    let current = SettingsTab::ALL.iter().position(|t| t == tab).unwrap_or(0);
+    if let Some(i) = segmented(ui, pal, current, &labels) {
+        *tab = SettingsTab::ALL[i];
+    }
 }
 
 /// A titled card spanning the page width.

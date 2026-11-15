@@ -728,6 +728,7 @@ pub fn build_import(
                 order: pos as u32,
                 retired: false,
                 tests: vec![],
+                color: None,
             }
         })
         .collect();

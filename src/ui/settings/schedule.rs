@@ -243,6 +243,20 @@ fn rule_card(
         if ui.add_enabled(d.dirty(), Button::new("Revert")).clicked() {
             act = Some(Act::Revert(id.to_owned()));
         }
+        if is_default {
+            let defaults = Rule::default_global().stages;
+            let reset = ui
+                .add_enabled(
+                    editing && d.normalized() != defaults,
+                    Button::new("Reset to defaults"),
+                )
+                .on_hover_text(
+                    "Fills in Initial, Semi-annual after 6 months, then Annual every 12 months; nothing changes until you save.",
+                );
+            if reset.clicked() {
+                d.stages = defaults;
+            }
+        }
         if !is_default
             && !confirming
             && ui

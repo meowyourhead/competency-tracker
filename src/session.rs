@@ -19,7 +19,6 @@ use crate::snapshot::{self, DataDir, Loaded, Newest, ScanCache};
 
 pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_secs(3);
 pub const POLL_EVERY: Duration = Duration::from_secs(10);
-pub const WARNING_BEFORE: Duration = Duration::from_secs(60);
 /// Save at the latest this long after the data first became dirty, even if
 /// changes keep resetting the debounce.
 const AUTOSAVE_MAX_WAIT: Duration = Duration::from_secs(30);
@@ -84,6 +83,9 @@ pub struct Session {
     newer_schema: bool,
     corrupt: Vec<PathBuf>,
     last_activity: Instant,
+    /// When the inactivity prompt opened; its countdown runs from here and
+    /// only `continue_editing` (or leaving edit mode) clears it.
+    warning_started: Option<Instant>,
     last_heartbeat: Instant,
     last_poll: Instant,
     /// `EditingAvailable` was already emitted for the current free-lock spell.
@@ -284,6 +286,7 @@ impl Session {
             newer_schema: false,
             corrupt: Vec::new(),
             last_activity: inst,
+            warning_started: None,
             last_heartbeat: inst,
             last_poll: inst,
             available_announced: false,
@@ -367,11 +370,38 @@ impl Session {
         &self.corrupt
     }
 
+    /// Idle time before the inactivity prompt opens.
     pub fn inactivity_timeout(&self) -> Duration {
         Duration::from_secs(self.data.settings.inactivity_minutes.max(1) as u64 * 60)
     }
 
+    /// How long the prompt counts down before editing stops.
+    pub fn inactivity_grace(&self) -> Duration {
+        Duration::from_secs(self.data.settings.inactivity_grace_minutes.max(1) as u64 * 60)
+    }
+
+    /// While the inactivity prompt is counting down: the time left before
+    /// editing stops. `None` when not editing or no prompt is open.
+    pub fn warning_left(&self, inst: Instant) -> Option<Duration> {
+        let started = self.warning_started.filter(|_| self.is_editing())?;
+        Some(
+            self.inactivity_grace()
+                .saturating_sub(inst.saturating_duration_since(started)),
+        )
+    }
+
+    /// Input in the window. Resets the idle clock, but never ends a prompt
+    /// that is already counting down: only [`Session::continue_editing`] does.
     pub fn note_activity(&mut self, inst: Instant) {
+        if self.warning_started.is_none() {
+            self.last_activity = inst;
+        }
+    }
+
+    /// "Continue editing" in the inactivity prompt: ends the countdown and
+    /// starts the idle clock afresh.
+    pub fn continue_editing(&mut self, inst: Instant) {
+        self.warning_started = None;
         self.last_activity = inst;
     }
 
@@ -632,18 +662,24 @@ impl Session {
                 }
             }
         }
-        let idle = inst.saturating_duration_since(self.last_activity);
-        let timeout = self.inactivity_timeout();
-        if idle >= timeout {
-            let retry_wait = self.failed_at.is_some_and(|f| !elapsed(now, f, SAVE_RETRY));
-            if !retry_wait {
-                let _ = self.leave(now, LeaveReason::Inactivity);
+        match self.warning_started {
+            None => {
+                let idle = inst.saturating_duration_since(self.last_activity);
+                if idle >= self.inactivity_timeout() {
+                    self.warning_started = Some(inst);
+                    let secs_left = self.inactivity_grace().as_secs();
+                    self.pending
+                        .push(SessionEvent::InactivityWarning { secs_left });
+                }
             }
-        } else if idle + WARNING_BEFORE >= timeout {
-            let left = timeout - idle;
-            let secs_left = left.as_secs() + u64::from(left.subsec_nanos() > 0);
-            self.pending
-                .push(SessionEvent::InactivityWarning { secs_left });
+            Some(started) => {
+                if inst.saturating_duration_since(started) >= self.inactivity_grace() {
+                    let retry_wait = self.failed_at.is_some_and(|f| !elapsed(now, f, SAVE_RETRY));
+                    if !retry_wait {
+                        let _ = self.leave(now, LeaveReason::Inactivity);
+                    }
+                }
+            }
         }
     }
 
@@ -765,6 +801,7 @@ impl Session {
             .and_then(|every| HeartbeatThread::spawn(self.dir.lock_path(), self.me.clone(), every));
         self.mode = Mode::Editing;
         self.last_activity = inst;
+        self.warning_started = None;
         self.last_heartbeat = inst;
         self.dirty = false;
         self.dirty_since = None;
@@ -1036,46 +1073,72 @@ mod tests {
     fn inactivity_warns_then_releases() {
         let (_t, dir, clock) = setup();
         let mut s = open(&dir, "jtan", 1, &clock);
-        assert_eq!(s.inactivity_timeout(), Duration::from_secs(600));
+        assert_eq!(s.inactivity_timeout(), Duration::from_secs(900));
+        assert_eq!(s.inactivity_grace(), Duration::from_secs(900));
         change(&mut s, t0());
-        let ev = s.tick(at(539), clock.at(539));
-        assert!(!ev
-            .iter()
-            .any(|e| matches!(e, SessionEvent::InactivityWarning { .. })));
-        let ev = s.tick(at(540), clock.at(540));
-        assert!(ev.contains(&SessionEvent::InactivityWarning { secs_left: 60 }));
-        let ev = s.tick(at(570), clock.at(570));
-        assert!(ev.contains(&SessionEvent::InactivityWarning { secs_left: 30 }));
+        let warned = |ev: &[SessionEvent]| {
+            ev.iter()
+                .any(|e| matches!(e, SessionEvent::InactivityWarning { .. }))
+        };
+        assert!(!warned(&s.tick(at(899), clock.at(899))));
+        assert_eq!(s.warning_left(clock.at(899)), None);
+        let ev = s.tick(at(900), clock.at(900));
+        assert!(ev.contains(&SessionEvent::InactivityWarning { secs_left: 900 }));
+        // Announced once; the countdown carries on.
+        assert!(!warned(&s.tick(at(1000), clock.at(1000))));
+        assert_eq!(
+            s.warning_left(clock.at(1000)),
+            Some(Duration::from_secs(800))
+        );
         assert!(s.is_editing());
-        change(&mut s, at(580));
-        let ev = s.tick(at(600), clock.at(600));
+        change(&mut s, at(1500));
+        let ev = s.tick(at(1800), clock.at(1800));
         assert!(ev.contains(&SessionEvent::LeftEditMode(LeaveReason::Inactivity)));
         assert_eq!(s.mode(), &Mode::Viewing { holder: None });
+        assert_eq!(s.warning_left(clock.at(1800)), None);
         assert!(!dir.lock_path().exists());
         let loaded = load_latest(&dir).unwrap().unwrap();
         assert_eq!(loaded.data.settings.due_soon_days, 45);
-        assert_eq!(loaded.data.saved_at, at(600));
+        assert_eq!(loaded.data.saved_at, at(1800));
     }
 
     #[test]
-    fn activity_resets_timer() {
+    fn activity_resets_idle_but_not_an_open_prompt() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        // Before the prompt, activity restarts the idle clock.
+        s.note_activity(clock.at(600));
+        assert!(s.tick(at(1499), clock.at(1499)).is_empty());
+        assert!(s
+            .tick(at(1500), clock.at(1500))
+            .contains(&SessionEvent::InactivityWarning { secs_left: 900 }));
+        // Once it is open, activity no longer stops the countdown.
+        s.note_activity(clock.at(1600));
+        assert!(s
+            .tick(at(2400), clock.at(2400))
+            .contains(&SessionEvent::LeftEditMode(LeaveReason::Inactivity)));
+    }
+
+    #[test]
+    fn continue_editing_ends_the_prompt() {
         let (_t, dir, clock) = setup();
         let mut s = open(&dir, "jtan", 1, &clock);
         assert!(s
-            .tick(at(540), clock.at(540))
-            .contains(&SessionEvent::InactivityWarning { secs_left: 60 }));
-        s.note_activity(clock.at(540));
-        let ev = s.tick(at(600), clock.at(600));
+            .tick(at(900), clock.at(900))
+            .contains(&SessionEvent::InactivityWarning { secs_left: 900 }));
+        s.continue_editing(clock.at(1000));
+        assert_eq!(s.warning_left(clock.at(1000)), None);
+        let ev = s.tick(at(1800), clock.at(1800));
         assert!(!ev.iter().any(|e| matches!(
             e,
             SessionEvent::InactivityWarning { .. } | SessionEvent::LeftEditMode(_)
         )));
         assert!(s.is_editing());
         assert!(s
-            .tick(at(1080), clock.at(1080))
-            .contains(&SessionEvent::InactivityWarning { secs_left: 60 }));
+            .tick(at(1900), clock.at(1900))
+            .contains(&SessionEvent::InactivityWarning { secs_left: 900 }));
         assert!(s
-            .tick(at(1140), clock.at(1140))
+            .tick(at(2800), clock.at(2800))
             .contains(&SessionEvent::LeftEditMode(LeaveReason::Inactivity)));
     }
 
@@ -1916,18 +1979,22 @@ mod tests {
     fn short_inactivity_timeout_from_settings() {
         let (_t, dir, clock) = setup();
         let mut s = open(&dir, "jtan", 1, &clock);
-        s.mutate(t0(), |d, _| d.settings.inactivity_minutes = 2)
-            .unwrap();
+        s.mutate(t0(), |d, _| {
+            d.settings.inactivity_minutes = 2;
+            d.settings.inactivity_grace_minutes = 1;
+        })
+        .unwrap();
         assert_eq!(s.inactivity_timeout(), Duration::from_secs(120));
-        let ev = s.tick(at(59), clock.at(59));
+        assert_eq!(s.inactivity_grace(), Duration::from_secs(60));
+        let ev = s.tick(at(119), clock.at(119));
         assert!(!ev
             .iter()
             .any(|e| matches!(e, SessionEvent::InactivityWarning { .. })));
         assert!(s
-            .tick(at(60), clock.at(60))
+            .tick(at(120), clock.at(120))
             .contains(&SessionEvent::InactivityWarning { secs_left: 60 }));
         assert!(s
-            .tick(at(120), clock.at(120))
+            .tick(at(180), clock.at(180))
             .contains(&SessionEvent::LeftEditMode(LeaveReason::Inactivity)));
         assert!(!dir.lock_path().exists());
     }

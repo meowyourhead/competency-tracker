@@ -8,7 +8,6 @@ use egui::{
     Stroke, UiBuilder, WidgetInfo, WidgetType,
 };
 
-use crate::dates::fmt_date;
 use crate::model::{Data, Id};
 use crate::query::{
     counts, distinct_titles, due_items, filter_items, group_by_person, group_by_test, DueFilter,
@@ -17,8 +16,8 @@ use crate::query::{
 use crate::schedule::DueStatus;
 use crate::session::Session;
 use crate::ui::app::Ctx;
-use crate::ui::theme::{heading, Palette};
-use crate::ui::widgets::{chip_select, due_pill, empty_state, search_box, stat_card};
+use crate::ui::theme::Palette;
+use crate::ui::widgets::{chip_select, due_pill, empty_state, search_box, segmented, stat_card};
 
 /// The page content is a calm centred column at most this wide.
 const MAX_WIDTH: f32 = 980.0;
@@ -69,14 +68,6 @@ fn centred(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 
 fn page(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
     let pal = cx.pal;
-    ui.horizontal(|ui| {
-        heading(ui, "Summary");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(fmt_date(cx.today)).color(pal.muted));
-        });
-    });
-    ui.add_space(16.0);
-
     let session: &Session = cx.session;
     let data = session.data();
     if data.staff.is_empty() {
@@ -219,7 +210,7 @@ fn filters(
             *filter = DueFilter::default();
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            segmented(ui, pal, group)
+            grouping_toggle(ui, pal, group)
         });
     });
 }
@@ -247,24 +238,12 @@ fn test_options(data: &Data, section: Option<&str>) -> Vec<(Id, String)> {
 }
 
 /// A two-option segmented control: "By person" / "By test".
-fn segmented(ui: &mut egui::Ui, pal: &Palette, group: &mut Grouping) {
-    Frame::new()
-        .fill(pal.sidebar)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(10)
-        .inner_margin(Margin::same(3))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for (g, label) in [(Grouping::Person, "By person"), (Grouping::Test, "By test")] {
-                    let selected = *group == g;
-                    let button = Button::selectable(selected, label).corner_radius(8);
-                    if ui.add(button).clicked() {
-                        *group = g;
-                    }
-                }
-            });
-        });
+fn grouping_toggle(ui: &mut egui::Ui, pal: &Palette, group: &mut Grouping) {
+    let options = [Grouping::Person, Grouping::Test];
+    let current = usize::from(*group == Grouping::Test);
+    if let Some(i) = segmented(ui, pal, current, &["By person", "By test"]) {
+        *group = options[i];
+    }
 }
 
 /// One card per group; returns the (staff, test) of a clicked row.

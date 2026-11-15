@@ -10,7 +10,7 @@ use crate::model::{AuditEntry, Data, Id};
 use crate::query::{distinct_audit_users, filter_audit, AuditFilter};
 use crate::session::Session;
 use crate::ui::app::Ctx;
-use crate::ui::theme::{heading, Palette};
+use crate::ui::theme::Palette;
 use crate::ui::widgets::{chip_select, date_picker, empty_state, search_box};
 
 /// Height of one list row (two lines of text).
@@ -79,7 +79,6 @@ impl AuditState {
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut AuditState) {
     let pal = cx.pal;
     let data = cx.session.data();
-    heading(ui, "Audit log");
     ui.label(RichText::new(format!("{} recorded changes", data.audit.len())).color(pal.muted));
     ui.add_space(12.0);
     filters(ui, pal, data, &mut state.filter, cx.today);

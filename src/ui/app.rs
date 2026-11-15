@@ -26,9 +26,124 @@ use crate::ui::sections::{self, SectionsState};
 use crate::ui::settings::{self, SettingsState};
 use crate::ui::summary::{self, SummaryState};
 use crate::ui::theme::{self, serif, Palette};
-use crate::ui::widgets::{icon_button, nav_item, search_box};
+use crate::ui::widgets::{choice, icon_button, nav_item, presence, search_box, window_button};
 
 const RELOAD_TOAST_EVERY: Duration = Duration::from_secs(60);
+/// Height of the strip holding the window buttons (the system title bar is off).
+const TITLEBAR_H: f32 = 44.0;
+/// How close to the window edge a press starts a resize.
+const RESIZE_GRIP: f32 = 5.0;
+
+/// What the user clicked in the title bar this frame.
+#[derive(Default)]
+struct TitleBarClicks {
+    toggle_editing: bool,
+    toggle_theme: bool,
+}
+
+/// The draggable strip at the top: double-click maximises. From the right:
+/// close, maximise / restore, minimise, a hairline, the theme switch, then
+/// the presence capsule (who you are, Editing / Viewing, and the button that
+/// changes it).
+fn title_bar(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    user: &str,
+    editing: bool,
+    can_toggle: bool,
+    theme: Theme,
+) -> TitleBarClicks {
+    let mut clicks = TitleBarClicks::default();
+    let rect = ui.max_rect();
+    let drag = ui.interact(rect, ui.id().with("titlebar_drag"), Sense::click_and_drag());
+    window_drag(ui.ctx(), &drag);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let ctx = ui.ctx().clone();
+            if window_button(ui, pal, icon::X, "Close window", true).clicked() {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            let (glyph, label) = if maximized {
+                (icon::COPY_SIMPLE, "Restore down")
+            } else {
+                (icon::SQUARE, "Maximize")
+            };
+            if window_button(ui, pal, glyph, label, false).clicked() {
+                ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+            }
+            if window_button(ui, pal, icon::MINUS, "Minimize", false).clicked() {
+                ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+            }
+            // A hairline sets the app's own controls apart from the window's.
+            ui.add_space(10.0);
+            let (line, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
+            ui.painter().vline(
+                line.center().x,
+                line.y_range(),
+                egui::Stroke::new(1.0, pal.border),
+            );
+            ui.add_space(8.0);
+            let (theme_icon, theme_label) = match theme {
+                Theme::Light => (icon::MOON, "Switch to dark mode"),
+                Theme::Dark => (icon::SUN, "Switch to light mode"),
+            };
+            clicks.toggle_theme = icon_button(ui, pal, theme_icon, theme_label).clicked();
+            ui.add_space(8.0);
+            clicks.toggle_editing = presence(ui, pal, user, editing, can_toggle).clicked();
+            ui.add_space(4.0);
+        });
+    });
+    clicks
+}
+
+/// Moves the window when `resp` (an empty, draggable area) is dragged, and
+/// toggles maximised on a double-click.
+fn window_drag(ctx: &egui::Context, resp: &egui::Response) {
+    if resp.double_clicked() {
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+    } else if resp.drag_started_by(egui::PointerButton::Primary) {
+        ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+    }
+}
+
+/// Without the system frame, the window resizes from a thin grip along its
+/// edges: show the resize cursor there and hand a press to the OS.
+fn resize_edges(ctx: &egui::Context) {
+    use egui::{CursorIcon as C, ResizeDirection as D};
+    let (pos, pressed, screen, maximized) = ctx.input(|i| {
+        (
+            i.pointer.hover_pos(),
+            i.pointer.primary_pressed(),
+            i.viewport_rect(),
+            i.viewport().maximized.unwrap_or(false),
+        )
+    });
+    let Some(pos) = pos else { return };
+    if maximized {
+        return;
+    }
+    let g = RESIZE_GRIP;
+    let (l, r) = (pos.x - screen.left() < g, screen.right() - pos.x < g);
+    let (t, b) = (pos.y - screen.top() < g, screen.bottom() - pos.y < g);
+    let (dir, cursor) = match (l, r, t, b) {
+        (true, _, true, _) => (D::NorthWest, C::ResizeNorthWest),
+        (_, true, true, _) => (D::NorthEast, C::ResizeNorthEast),
+        (true, _, _, true) => (D::SouthWest, C::ResizeSouthWest),
+        (_, true, _, true) => (D::SouthEast, C::ResizeSouthEast),
+        (true, ..) => (D::West, C::ResizeWest),
+        (_, true, ..) => (D::East, C::ResizeEast),
+        (_, _, true, _) => (D::North, C::ResizeNorth),
+        (.., true) => (D::South, C::ResizeSouth),
+        _ => return,
+    };
+    ctx.set_cursor_icon(cursor);
+    if pressed {
+        ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -53,14 +168,14 @@ impl Page {
             Page::Summary => "Summary",
             Page::Sections => "Sections",
             Page::Personnel => "Personnel",
-            Page::Audit => "Audit log",
+            Page::Audit => "History",
             Page::Settings => "Settings",
         }
     }
 
     fn icon(self) -> &'static str {
         match self {
-            Page::Summary => icon::HOUSE,
+            Page::Summary => icon::CHART_PIE_SLICE,
             Page::Sections => icon::SQUARES_FOUR,
             Page::Personnel => icon::USERS,
             Page::Audit => icon::CLOCK_COUNTER_CLOCKWISE,
@@ -88,8 +203,8 @@ pub struct TrackerApp {
     styled: bool,
     toasts: Vec<Toast>,
     modal: Option<Modal>,
-    /// When the inactivity countdown ends.
-    warn_deadline: Option<Instant>,
+    /// Ask the OS to flash the window (the inactivity prompt just opened).
+    attention: bool,
     search: String,
     open_detail: Option<(Id, Id)>,
     /// The close was cleared (saved, or the user chose to quit anyway).
@@ -130,7 +245,7 @@ impl TrackerApp {
             styled: false,
             toasts: Vec::new(),
             modal: None,
-            warn_deadline: None,
+            attention: false,
             search: String::new(),
             open_detail: None,
             allow_close: false,
@@ -171,6 +286,11 @@ impl TrackerApp {
         for ev in self.session.tick(now, inst) {
             self.on_event(ev, inst);
         }
+        if std::mem::take(&mut self.attention) {
+            ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
         self.handle_close(ctx, now, inst);
         ctx.request_repaint_after(Duration::from_secs(1));
     }
@@ -187,13 +307,20 @@ impl TrackerApp {
         let (now, inst) = (now_ts(), Instant::now());
         // Input events are only fresh in a ui pass (a logic-only pass while
         // hidden sees the last shown frame's), so activity is noted here.
+        // Once the inactivity prompt is open, activity no longer counts: only
+        // its "Continue editing" button ends the countdown.
         if ctx.input(|i| !i.events.is_empty()) {
             self.session.note_activity(inst);
-            // Activity ends any countdown at once, so it never goes stale.
-            self.warn_deadline = None;
-            if matches!(self.modal, Some(Modal::InactivityCountdown)) {
-                self.modal = None;
-            }
+        }
+        match (
+            self.session.warning_left(inst).is_some(),
+            matches!(self.modal, Some(Modal::InactivityCountdown)),
+        ) {
+            // Opened while another dialog was up, or the event was missed.
+            (true, false) if self.modal.is_none() => self.modal = Some(Modal::InactivityCountdown),
+            // Editing ended some other way: the prompt has nothing to ask.
+            (false, true) => self.modal = None,
+            _ => {}
         }
         self.toasts.retain(|t| t.until > inst);
         let focus_search =
@@ -216,10 +343,32 @@ impl TrackerApp {
                     .fill(pal.sidebar)
                     .inner_margin(Margin::same(12)),
             )
-            .show(ui, |ui| self.sidebar(ui, &pal, now, inst, focus_search));
-        if overlays::banner(ui, &pal, &self.session) {
-            self.start_editing(now, inst);
+            .show(ui, |ui| self.sidebar(ui, &pal, focus_search));
+        let editing = self.session.is_editing();
+        let can_toggle = editing || self.can_start_editing();
+        let clicks = Panel::top("titlebar")
+            .exact_size(TITLEBAR_H)
+            .resizable(false)
+            .frame(Frame::new().fill(pal.bg))
+            .show(ui, |ui| {
+                title_bar(
+                    ui,
+                    &pal,
+                    self.session.user(),
+                    editing,
+                    can_toggle,
+                    self.prefs.theme,
+                )
+            })
+            .inner;
+        if clicks.toggle_editing {
+            self.toggle_editing(now, inst);
         }
+        if clicks.toggle_theme {
+            self.toggle_theme(&ctx);
+        }
+        let pal = theme::palette(self.prefs.theme);
+        overlays::banner(ui, &pal, &self.session);
         let today = now.date_naive();
         // Drawn on every page whenever a detail target is open; slides in and out.
         let mut detail_open = self.open_detail.is_some();
@@ -239,11 +388,12 @@ impl TrackerApp {
                 detail::show(ui, &mut cx, &mut self.detail);
             });
         CentralPanel::default()
-            .frame(
-                Frame::new()
-                    .fill(pal.bg)
-                    .inner_margin(Margin::symmetric(40, 28)),
-            )
+            .frame(Frame::new().fill(pal.bg).inner_margin(Margin {
+                left: 40,
+                right: 40,
+                top: 8,
+                bottom: 28,
+            }))
             .show(ui, |ui| {
                 ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let mut cx = Ctx {
@@ -267,8 +417,9 @@ impl TrackerApp {
             // Reopening the same pair later starts fresh.
             self.detail = DetailState::default();
         }
-        self.show_modal(&ctx, now, inst);
+        self.show_modal(&ctx, &pal, now, inst);
         overlays::show_toasts(&ctx, &pal, &self.toasts);
+        resize_edges(&ctx);
     }
 
     fn on_event(&mut self, ev: SessionEvent, inst: Instant) {
@@ -276,14 +427,14 @@ impl TrackerApp {
             SessionEvent::Saved => self.toasts.push(Toast::new("Saved")),
             // The banner shows `save_error` / the mode; nothing else to do.
             SessionEvent::SaveFailed(_) | SessionEvent::EditingAvailable => {}
-            SessionEvent::InactivityWarning { secs_left } => {
-                self.warn_deadline = Some(inst + Duration::from_secs(secs_left));
+            SessionEvent::InactivityWarning { .. } => {
                 if self.modal.is_none() {
                     self.modal = Some(Modal::InactivityCountdown);
                 }
+                // Even when minimised: the window flashes in the taskbar.
+                self.attention = true;
             }
             SessionEvent::LeftEditMode(reason) => {
-                self.warn_deadline = None;
                 if matches!(self.modal, Some(Modal::InactivityCountdown)) {
                     self.modal = None;
                 }
@@ -353,9 +504,16 @@ impl TrackerApp {
         }
     }
 
-    fn show_modal(&mut self, ctx: &egui::Context, now: Ts, inst: Instant) {
+    fn show_modal(&mut self, ctx: &egui::Context, pal: &Palette, now: Ts, inst: Instant) {
         let Some(modal) = &self.modal else { return };
-        let Some(choice) = overlays::show_modal(ctx, modal, self.warn_deadline, inst) else {
+        let countdown = self.session.warning_left(inst).map(|left| {
+            (
+                left,
+                self.session.inactivity_grace(),
+                self.session.inactivity_timeout(),
+            )
+        });
+        let Some(choice) = overlays::show_modal(ctx, pal, modal, countdown) else {
             return;
         };
         match choice {
@@ -366,9 +524,14 @@ impl TrackerApp {
                 }
             }
             ModalChoice::Stay => {
-                self.session.note_activity(inst);
-                self.warn_deadline = None;
+                self.session.continue_editing(inst);
                 self.modal = None;
+            }
+            ModalChoice::Relinquish => {
+                self.modal = None;
+                if let Err(e) = self.session.stop_editing(now) {
+                    self.toasts.push(Toast::new(format!("Couldn't save: {e}")));
+                }
             }
             ModalChoice::RetryExit => {
                 if self.finish_exit(now, inst) {
@@ -445,6 +608,7 @@ impl TrackerApp {
                 self.page = Page::Personnel;
             }
             SearchHit::Section(id) => {
+                self.sections.all = false;
                 self.sections.section = Some(id);
                 self.sections.test = None;
                 self.page = Page::Sections;
@@ -453,6 +617,7 @@ impl TrackerApp {
                 section_id,
                 test_id,
             } => {
+                self.sections.all = false;
                 self.sections.section = Some(section_id);
                 self.sections.test = Some(test_id);
                 self.page = Page::Sections;
@@ -460,15 +625,20 @@ impl TrackerApp {
         }
     }
 
-    fn sidebar(
-        &mut self,
-        ui: &mut egui::Ui,
-        pal: &Palette,
-        now: Ts,
-        inst: Instant,
-        focus_search: bool,
-    ) {
+    fn sidebar(&mut self, ui: &mut egui::Ui, pal: &Palette, focus_search: bool) {
         let compact = self.prefs.sidebar_collapsed;
+        // The header's empty space moves the window, like a title bar. Added
+        // first so the collapse button on top of it still takes its clicks.
+        let header = egui::Rect::from_min_size(
+            ui.max_rect().min - egui::vec2(12.0, 12.0),
+            egui::vec2(ui.max_rect().width() + 24.0, 44.0),
+        );
+        let drag = ui.interact(
+            header,
+            ui.id().with("sidebar_drag"),
+            Sense::click_and_drag(),
+        );
+        window_drag(ui.ctx(), &drag);
         ui.horizontal(|ui| {
             if !compact {
                 ui.label(
@@ -508,61 +678,6 @@ impl TrackerApp {
                 self.page = page;
             }
         }
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            let editing = self.session.is_editing();
-            let ctx = ui.ctx().clone();
-            let (theme_icon, theme_label) = match self.prefs.theme {
-                Theme::Light => (icon::MOON, "Switch to dark mode"),
-                Theme::Dark => (icon::SUN, "Switch to light mode"),
-            };
-            let edit_label = if editing {
-                "Stop editing"
-            } else {
-                "Start editing"
-            };
-            let can_toggle = editing || self.can_start_editing();
-            if compact {
-                if icon_button(ui, pal, theme_icon, theme_label).clicked() {
-                    self.toggle_theme(&ctx);
-                }
-                let glyph = if editing {
-                    icon::PENCIL_SIMPLE
-                } else {
-                    icon::EYE
-                };
-                let resp = ui
-                    .add_enabled_ui(can_toggle, |ui| icon_button(ui, pal, glyph, edit_label))
-                    .inner;
-                if resp.clicked() {
-                    self.toggle_editing(now, inst);
-                }
-                return;
-            }
-            ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
-                ui.painter().circle_filled(
-                    dot.center(),
-                    4.0,
-                    if editing { pal.accent } else { pal.muted },
-                );
-                let status = if editing { "Editing" } else { "Viewing" };
-                ui.label(
-                    RichText::new(format!("{} \u{b7} {status}", self.session.user()))
-                        .color(pal.text),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, pal, theme_icon, theme_label).clicked() {
-                        self.toggle_theme(&ctx);
-                    }
-                });
-            });
-            let button =
-                egui::Button::new(edit_label).min_size(egui::vec2(ui.available_width(), 30.0));
-            if ui.add_enabled(can_toggle, button).clicked() {
-                self.toggle_editing(now, inst);
-            }
-            ui.separator();
-        });
     }
 
     fn search_field(&mut self, ui: &mut egui::Ui, focus: bool) {
@@ -579,10 +694,12 @@ impl TrackerApp {
         }
         let hits = search(self.session.data(), &q, 8);
         let mut picked = None;
+        let pal = theme::palette(self.prefs.theme);
         Popup::from_response(&resp)
             .open(true)
             .width(resp.rect.width())
             .show(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
                 if hits.is_empty() {
                     ui.label(RichText::new("No matches").weak());
                 }
@@ -592,10 +709,7 @@ impl TrackerApp {
                         SearchHit::Section(_) => icon::SQUARES_FOUR,
                         SearchHit::Test { .. } => icon::FLASK,
                     };
-                    if ui
-                        .selectable_label(false, format!("{glyph}  {label}"))
-                        .clicked()
-                    {
+                    if choice(ui, &pal, false, &format!("{glyph}  {label}"), true).clicked() {
                         picked = Some(hit);
                     }
                 }
@@ -643,32 +757,68 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
-    #[test]
-    fn countdown_closes_on_activity() {
-        let dir = tempfile::tempdir().unwrap();
+    /// A session whose inactivity prompt is already counting down (idle
+    /// time 1 minute, so a tick a minute after opening starts the prompt).
+    fn prompting_app(dir: &tempfile::TempDir) -> TrackerApp {
         let data_dir = DataDir {
             root: dir.path().join("CompetencyData"),
         };
-        let session = Session::open(data_dir, "tester", "pc", 1, now_ts(), Instant::now()).unwrap();
-        let mut h = Harness::builder()
+        let start = Instant::now() - Duration::from_secs(61);
+        let mut session = Session::open(data_dir, "tester", "pc", 1, now_ts(), start).unwrap();
+        session
+            .mutate(now_ts(), |d, _| d.settings.inactivity_minutes = 1)
+            .unwrap();
+        let ev = session.tick(now_ts(), Instant::now());
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, SessionEvent::InactivityWarning { .. })));
+        TrackerApp::new_for_test(session)
+    }
+
+    fn harness(app: TrackerApp) -> Harness<'static, TrackerApp> {
+        Harness::builder()
             .with_size(egui::vec2(1280.0, 800.0))
-            .build_ui_state(
-                |ui, app: &mut TrackerApp| app.show_root(ui),
-                TrackerApp::new_for_test(session),
-            );
-        h.state_mut().warn_deadline = Some(Instant::now() + Duration::from_secs(40));
-        h.state_mut().modal = Some(Modal::InactivityCountdown);
-        h.run();
-        assert!(h.query_by_label("Still there?").is_some());
+            .build_ui_state(|ui, app: &mut TrackerApp| app.show_root(ui), app)
+    }
+
+    #[test]
+    fn inactivity_prompt_ignores_activity_until_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(prompting_app(&dir));
+        h.run_steps(3);
+        assert!(h.query_by_label("Are you still editing?").is_some());
+        assert!(
+            h.query_by_label_contains("15:00").is_some()
+                || h.query_by_label_contains("14:59").is_some()
+        );
 
         h.event(egui::Event::Text("x".into()));
-        h.run();
+        h.run_steps(3);
         assert!(
-            h.query_by_label("Still there?").is_none(),
-            "typing ends the countdown"
+            h.query_by_label("Are you still editing?").is_some(),
+            "typing doesn't end the countdown"
         );
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(h.query_by_label("Are you still editing?").is_some());
+
+        h.get_by_label("Continue editing").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Are you still editing?").is_none());
         assert!(h.state().modal.is_none());
-        assert!(h.state().warn_deadline.is_none());
+        assert!(h.state().session().warning_left(Instant::now()).is_none());
+        assert!(h.state().session().is_editing());
+    }
+
+    #[test]
+    fn inactivity_prompt_can_stop_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(prompting_app(&dir));
+        h.run_steps(3);
+        h.get_by_label("Stop editing now").click();
+        h.run_steps(3);
+        assert!(!h.state().session().is_editing());
+        assert!(h.query_by_label("Are you still editing?").is_none());
     }
 
     fn toast_texts(app: &TrackerApp) -> Vec<&str> {

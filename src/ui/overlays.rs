@@ -4,11 +4,14 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use egui::{Align2, Frame, Margin, Panel, RichText};
+use egui::{Align2, Color32, Frame, Margin, Panel, RichText, Stroke};
 use egui_phosphor::regular as icon;
 
 use crate::session::{Mode, Session};
-use crate::ui::theme::{serif, Palette};
+use crate::ui::theme::{medium, serif, Palette};
+
+/// Widest a toast gets before its text wraps.
+const TOAST_MAX_W: f32 = 460.0;
 
 /// A short confirmation shown bottom-centre.
 pub struct Toast {
@@ -62,6 +65,8 @@ pub(crate) enum ModalChoice {
     Confirm,
     /// Keep editing (inactivity countdown).
     Stay,
+    /// Stop editing now (inactivity countdown).
+    Relinquish,
     RetryExit,
     QuitAnyway,
     /// Close the window for real.
@@ -75,10 +80,9 @@ enum Tone {
 }
 
 /// The single most important banner, if any: load error, read-only, save
-/// error, corrupt files, then viewing / editing available. Returns true when
-/// "Start editing" was clicked.
-pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) -> bool {
-    let mut start_button = false;
+/// error, corrupt files, then viewing / editing available. Starting to edit
+/// is the title bar's job, so the banner only informs.
+pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) {
     let mut hover = None;
     let (tone, text) = if let Some(e) = s.load_error() {
         (Tone::Error, format!("Can't read the data folder: {e}"))
@@ -103,7 +107,7 @@ pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) -> bool {
         )
     } else {
         match s.mode() {
-            Mode::Editing => return false,
+            Mode::Editing => return,
             Mode::Viewing { holder: Some(h) } => (
                 Tone::Info,
                 format!(
@@ -112,10 +116,7 @@ pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) -> bool {
                     h.acquired_at.format("%H:%M")
                 ),
             ),
-            Mode::Viewing { holder: None } => {
-                start_button = true;
-                (Tone::Info, "Editing is available".to_owned())
-            }
+            Mode::Viewing { holder: None } => (Tone::Info, "Editing is available".to_owned()),
         }
     };
     let (fill, fg) = match tone {
@@ -127,7 +128,6 @@ pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) -> bool {
         Tone::Error | Tone::Warn => icon::WARNING,
         Tone::Info => icon::EYE,
     };
-    let mut start = false;
     Panel::top("banner")
         .frame(
             Frame::new()
@@ -141,20 +141,22 @@ pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) -> bool {
                 if let Some(h) = hover {
                     resp.on_hover_text(h);
                 }
-                start = start_button && ui.button("Start editing").clicked();
             });
         });
-    start
 }
 
-/// Draws `modal`; returns the user's choice, if any. `warn_deadline` is when
-/// the inactivity countdown ends.
+/// Draws `modal`; returns the user's choice, if any. `countdown` is (time
+/// left, the countdown's full length, the idle time that opened it) while
+/// the inactivity prompt is counting down.
 pub(crate) fn show_modal(
     ctx: &egui::Context,
+    pal: &Palette,
     modal: &Modal,
-    warn_deadline: Option<Instant>,
-    inst: Instant,
+    countdown: Option<(Duration, Duration, Duration)>,
 ) -> Option<ModalChoice> {
+    if let Modal::InactivityCountdown = modal {
+        return inactivity_prompt(ctx, pal, countdown);
+    }
     let mut choice = None;
     let frame = Frame::window(&ctx.global_style()).inner_margin(Margin::same(24));
     let resp = egui::Modal::new(egui::Id::new("app_modal"))
@@ -176,17 +178,7 @@ pub(crate) fn show_modal(
                         }
                     });
                 }
-                Modal::InactivityCountdown => {
-                    let left =
-                        warn_deadline.map_or(0, |d| d.saturating_duration_since(inst).as_secs());
-                    title(ui, "Still there?");
-                    ui.label(format!(
-                        "Editing stops in {left} s because there has been no activity."
-                    ));
-                    if ui.button("Stay").clicked() {
-                        choice = Some(ModalChoice::Stay);
-                    }
-                }
+                Modal::InactivityCountdown => unreachable!("drawn by inactivity_prompt"),
                 Modal::ExitFailed { error } => {
                     title(ui, "Couldn't save your changes");
                     ui.label(format!("Couldn't save your changes: {error}"));
@@ -227,11 +219,122 @@ pub(crate) fn show_modal(
     if choice.is_none() && resp.should_close() {
         choice = match modal {
             Modal::Confirm { .. } => Some(ModalChoice::Close),
-            Modal::InactivityCountdown => Some(ModalChoice::Stay),
             _ => None,
         };
     }
     choice
+}
+
+/// "Are you still editing?": a countdown ring with the time left, over a
+/// near-opaque veil of the page colour that hides the app behind it (egui
+/// can't blur, so it frosts instead). Escape and clicks outside do nothing;
+/// only its two buttons answer it.
+fn inactivity_prompt(
+    ctx: &egui::Context,
+    pal: &Palette,
+    countdown: Option<(Duration, Duration, Duration)>,
+) -> Option<ModalChoice> {
+    let (left, total, idle) = countdown?;
+    let mut choice = None;
+    let veil = pal.bg.gamma_multiply(0.94);
+    let frame = Frame::window(&ctx.global_style())
+        .inner_margin(Margin::symmetric(36, 32))
+        .corner_radius(16);
+    egui::Modal::new(egui::Id::new("inactivity_prompt"))
+        .frame(frame)
+        .backdrop_color(veil)
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.vertical_centered(|ui| {
+                countdown_ring(ui, pal, left, total);
+                ui.add_space(18.0);
+                ui.label(
+                    RichText::new("Are you still editing?")
+                        .family(serif())
+                        .size(22.0)
+                        .color(pal.text),
+                );
+                ui.add_space(6.0);
+                let mins = idle.as_secs().div_ceil(60);
+                let s = if mins == 1 { "" } else { "s" };
+                ui.label(
+                    RichText::new(format!(
+                        "Nothing has happened for {mins} minute{s}. When the timer runs out, \
+                         your changes are saved and editing stops so someone else can edit."
+                    ))
+                    .color(pal.muted),
+                );
+                ui.add_space(20.0);
+                let wide = egui::vec2(ui.available_width(), 36.0);
+                let primary = egui::Button::new(
+                    RichText::new("Continue editing")
+                        .family(medium())
+                        .color(Color32::WHITE),
+                )
+                .fill(pal.accent)
+                .min_size(wide);
+                if ui.add(primary).clicked() {
+                    choice = Some(ModalChoice::Stay);
+                }
+                ui.add_space(2.0);
+                let quiet = egui::Button::new(RichText::new("Stop editing now").color(pal.text))
+                    .frame(false)
+                    .min_size(wide);
+                if ui.add(quiet).clicked() {
+                    choice = Some(ModalChoice::Relinquish);
+                }
+            });
+        });
+    // The countdown has to keep moving even with no input.
+    ctx.request_repaint_after(Duration::from_millis(250));
+    choice
+}
+
+/// A large ring that empties clockwise as the countdown runs, with the time
+/// left in the middle. It turns red for the last minute.
+fn countdown_ring(ui: &mut egui::Ui, pal: &Palette, left: Duration, total: Duration) {
+    const D: f32 = 132.0;
+    const W: f32 = 5.0;
+    let frac = (left.as_secs_f32() / total.as_secs_f32().max(1.0)).clamp(0.0, 1.0);
+    let urgent = left.as_secs() < 60;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(D, D), egui::Sense::hover());
+    let p = ui.painter();
+    let c = rect.center();
+    let r = D / 2.0 - W;
+    p.circle_stroke(c, r, Stroke::new(W, pal.border));
+    let color = if urgent { pal.red_fg } else { pal.accent };
+    if frac > 0.001 {
+        let steps = (96.0 * frac).ceil().max(2.0) as usize;
+        let start = -std::f32::consts::FRAC_PI_2;
+        let sweep = std::f32::consts::TAU * frac;
+        let points = (0..=steps)
+            .map(|i| c + r * egui::Vec2::angled(start + sweep * i as f32 / steps as f32))
+            .collect();
+        p.add(egui::Shape::line(points, Stroke::new(W, color)));
+    }
+    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    let clock = format!("{}:{:02}", secs / 60, secs % 60);
+    p.text(
+        c - egui::vec2(0.0, 6.0),
+        Align2::CENTER_CENTER,
+        &clock,
+        egui::FontId::new(32.0, serif()),
+        if urgent { pal.red_fg } else { pal.text },
+    );
+    p.text(
+        c + egui::vec2(0.0, 22.0),
+        Align2::CENTER_CENTER,
+        "left",
+        egui::FontId::proportional(12.0),
+        pal.muted,
+    );
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::ProgressIndicator,
+            true,
+            format!("{clock} left before editing stops"),
+        )
+    });
 }
 
 pub(crate) fn show_toasts(ctx: &egui::Context, pal: &Palette, toasts: &[Toast]) {
@@ -243,12 +346,35 @@ pub(crate) fn show_toasts(ctx: &egui::Context, pal: &Palette, toasts: &[Toast]) 
         .order(egui::Order::Foreground)
         .interactable(false)
         .show(ctx, |ui| {
-            for t in toasts {
-                Frame::new()
-                    .fill(pal.text)
-                    .corner_radius(10)
-                    .inner_margin(Margin::symmetric(14, 8))
-                    .show(ui, |ui| ui.label(RichText::new(&t.text).color(pal.bg)));
-            }
+            // An area sizes itself from last frame's content, so a label left
+            // to wrap at the area's width breaks a new toast's words onto
+            // separate rows. Lay each toast out at a fixed width instead: one
+            // line when it fits, wrapped at TOAST_MAX_W when it doesn't.
+            let max_w = (ctx.content_rect().width() - 64.0).clamp(160.0, TOAST_MAX_W);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                for t in toasts {
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    let one_line = ui
+                        .painter()
+                        .layout_no_wrap(t.text.clone(), font.clone(), pal.bg)
+                        .size()
+                        .x;
+                    let width = one_line.min(max_w).ceil();
+                    let galley = ui.painter().layout(t.text.clone(), font, pal.bg, width);
+                    Frame::new()
+                        .fill(pal.text)
+                        .corner_radius(10)
+                        .inner_margin(Margin::symmetric(16, 10))
+                        .show(ui, |ui| {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+                            ui.painter().galley(rect.min, galley, pal.bg);
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &t.text)
+                            });
+                        });
+                }
+            });
         });
 }

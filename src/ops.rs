@@ -37,6 +37,8 @@ pub enum OpError {
     ConfirmMismatch,
     #[error("the default rule cannot be deleted")]
     IsDefaultRule,
+    #[error("can't merge a person with themselves")]
+    SamePerson,
 }
 
 type Res<T = ()> = Result<T, OpError>;
@@ -481,6 +483,130 @@ pub fn delete_staff_permanently(d: &mut Data, a: &Actor, id: &str, confirm_text:
     Ok(())
 }
 
+/// Merges `merge_id` into `keep_id` (two records of the same person) and
+/// deletes `merge_id`. The kept person gets the union of both people's
+/// assignments, completions, skips, due dates, delay notes and notes; where
+/// both have one for the same test, the kept person's wins (an assignment
+/// beats N/A). Completions that are exact duplicates (same test, stage and
+/// date) are kept once. Title and join date are filled in from the merged
+/// person only when the kept one has none. History entries that named the
+/// merged person now point at the kept one.
+pub fn merge_staff(d: &mut Data, a: &Actor, keep_id: &str, merge_id: &str) -> Res<usize> {
+    if keep_id == merge_id {
+        return Err(OpError::SamePerson);
+    }
+    let keep_name = staff_name(d, keep_id)?;
+    let gone = d
+        .staff(merge_id)
+        .cloned()
+        .ok_or(OpError::NotFound("staff"))?;
+    let keep = d.staff_mut(keep_id).expect("checked above");
+    for (test, asg) in gone.assignments {
+        match keep.assignments.get_mut(&test) {
+            None => {
+                keep.assignments.insert(test, asg);
+            }
+            Some(k) => {
+                if k.state == AssignState::Na && asg.state == AssignState::Assigned {
+                    *k = asg;
+                } else if k.state == asg.state && asg.since < k.since {
+                    k.since = asg.since;
+                }
+            }
+        }
+    }
+    if keep.title.trim().is_empty() {
+        keep.title = gone.title.clone();
+    }
+    keep.joined = match (keep.joined, gone.joined) {
+        (Some(k), Some(g)) => Some(k.min(g)),
+        (k, g) => k.or(g),
+    };
+    if gone.status == StaffStatus::Active {
+        keep.status = StaffStatus::Active;
+    }
+
+    // Completions: move over, dropping exact duplicates of the kept person's.
+    let existing: std::collections::HashSet<(Id, u32, NaiveDate)> = d
+        .records
+        .iter()
+        .filter(|r| r.staff_id == keep_id)
+        .map(|r| (r.test_id.clone(), r.stage_index, r.completed_on))
+        .collect();
+    let mut moved = 0;
+    d.records.retain_mut(|r| {
+        if r.staff_id != merge_id {
+            return true;
+        }
+        if existing.contains(&(r.test_id.clone(), r.stage_index, r.completed_on)) {
+            return false;
+        }
+        r.staff_id = keep_id.to_owned();
+        moved += 1;
+        true
+    });
+
+    let kept_skips: std::collections::HashSet<(Id, u32)> = d
+        .skipped
+        .iter()
+        .filter(|x| x.staff_id == keep_id)
+        .map(|x| (x.test_id.clone(), x.stage_index))
+        .collect();
+    d.skipped.retain_mut(|x| {
+        if x.staff_id != merge_id {
+            return true;
+        }
+        if kept_skips.contains(&(x.test_id.clone(), x.stage_index)) {
+            return false;
+        }
+        x.staff_id = keep_id.to_owned();
+        true
+    });
+
+    let kept_overrides: std::collections::HashSet<Id> = d
+        .due_overrides
+        .iter()
+        .filter(|x| x.staff_id == keep_id)
+        .map(|x| x.test_id.clone())
+        .collect();
+    d.due_overrides.retain_mut(|x| {
+        if x.staff_id != merge_id {
+            return true;
+        }
+        if kept_overrides.contains(&x.test_id) {
+            return false;
+        }
+        x.staff_id = keep_id.to_owned();
+        true
+    });
+
+    for n in d.delay_notes.iter_mut().filter(|n| n.staff_id == merge_id) {
+        n.staff_id = keep_id.to_owned();
+    }
+    for n in d.notes.iter_mut().filter(|n| n.staff_id == merge_id) {
+        n.staff_id = keep_id.to_owned();
+    }
+    for e in &mut d.audit {
+        if let Some(v) = e.refs.get_mut("staff_id").filter(|v| *v == merge_id) {
+            *v = keep_id.to_owned();
+        }
+    }
+    d.staff.retain(|s| s.id != merge_id);
+    let records = if moved == 1 {
+        "1 completion".to_owned()
+    } else {
+        format!("{moved} completions")
+    };
+    log(
+        d,
+        a,
+        "staff.merge",
+        format!("Merged {} into {keep_name} ({records} moved)", gone.name),
+        &[("staff_id", keep_id)],
+    );
+    Ok(moved)
+}
+
 pub fn set_assignment(
     d: &mut Data,
     a: &Actor,
@@ -587,6 +713,7 @@ pub fn add_section(d: &mut Data, a: &Actor, name: &str) -> Res<Id> {
         order,
         retired: false,
         tests: vec![],
+        color: None,
     });
     log(
         d,
@@ -648,6 +775,24 @@ pub fn move_section(d: &mut Data, a: &Actor, id: &str, delta: i32) -> Res {
         format!("Moved section {name} to position {}", to + 1),
         &[("section_id", id)],
     );
+    Ok(())
+}
+
+/// Sets (`Some("#RRGGBB")`) or clears (`None`, back to the default) a
+/// section's colour.
+pub fn set_section_color(d: &mut Data, a: &Actor, id: &str, color: Option<u32>) -> Res {
+    let s = d
+        .sections
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or(OpError::NotFound("section"))?;
+    s.color = color.map(fmt_hex_color);
+    let name = s.name.clone();
+    let detail = match color {
+        Some(c) => format!("Set the colour of section {name} to {}", fmt_hex_color(c)),
+        None => format!("Reset the colour of section {name}"),
+    };
+    log(d, a, "section.color", detail, &[("section_id", id)]);
     Ok(())
 }
 
@@ -941,6 +1086,12 @@ pub fn update_settings(d: &mut Data, a: &Actor, s: Settings) -> Res {
             o.inactivity_minutes, s.inactivity_minutes
         ));
     }
+    if o.inactivity_grace_minutes != s.inactivity_grace_minutes {
+        changes.push(format!(
+            "inactivity prompt minutes {} to {}",
+            o.inactivity_grace_minutes, s.inactivity_grace_minutes
+        ));
+    }
     if o.initial_due_days != s.initial_due_days {
         changes.push(format!(
             "initial due days {} to {}",
@@ -1014,6 +1165,57 @@ mod tests {
             e.detail,
             "Marked Cell-DYN Ruby Initial complete for Agnes on 12 Oct 2026"
         );
+    }
+
+    #[test]
+    fn merge_staff_keeps_both_peoples_competencies() {
+        let (mut d, _, t1, t2, st) = fixture();
+        let a = actor();
+        let dup = add_staff(&mut d, &a, "Agnes Tan", "", Some(day(2020, 1, 1))).unwrap();
+        set_assignment(&mut d, &a, &st, &t1, Some(AssignState::Na)).unwrap();
+        set_assignment(&mut d, &a, &dup, &t1, Some(AssignState::Assigned)).unwrap();
+        set_assignment(&mut d, &a, &dup, &t2, Some(AssignState::Assigned)).unwrap();
+        add_completion(&mut d, &a, &st, &t1, 0, day(2026, 1, 5), "").unwrap();
+        // The same completion twice, and one only the duplicate has.
+        add_completion(&mut d, &a, &dup, &t1, 0, day(2026, 1, 5), "").unwrap();
+        add_completion(&mut d, &a, &dup, &t2, 0, day(2026, 2, 5), "").unwrap();
+        set_due_override(&mut d, &a, &dup, &t2, Some(day(2027, 3, 1))).unwrap();
+
+        let moved = merge_staff(&mut d, &a, &st, &dup).unwrap();
+        assert_eq!(moved, 1);
+        assert!(d.staff(&dup).is_none());
+        let s = d.staff(&st).unwrap();
+        assert_eq!(s.title, "MLT", "the kept title wins");
+        assert_eq!(
+            s.joined,
+            Some(day(2020, 1, 1)),
+            "filled from the merged one"
+        );
+        assert_eq!(s.assignments[&t1].state, AssignState::Assigned);
+        assert_eq!(s.assignments[&t2].state, AssignState::Assigned);
+        assert_eq!(d.records.iter().filter(|r| r.staff_id == st).count(), 2);
+        assert!(d.records.iter().all(|r| r.staff_id != dup));
+        assert_eq!(d.due_overrides[0].staff_id, st);
+        assert!(d
+            .audit
+            .iter()
+            .all(|e| e.refs.get("staff_id").map(String::as_str) != Some(dup.as_str())));
+        assert_eq!(
+            d.audit.last().unwrap().detail,
+            "Merged Agnes Tan into Agnes (1 completion moved)"
+        );
+        assert_eq!(merge_staff(&mut d, &a, &st, &st), Err(OpError::SamePerson));
+    }
+
+    #[test]
+    fn section_color_set_and_reset() {
+        let (mut d, sec, ..) = fixture();
+        let a = actor();
+        set_section_color(&mut d, &a, &sec, Some(0x112233)).unwrap();
+        assert_eq!(d.sections[0].color.as_deref(), Some("#112233"));
+        set_section_color(&mut d, &a, &sec, None).unwrap();
+        assert_eq!(d.sections[0].color, None);
+        assert_eq!(d.audit.len(), 2);
     }
 
     #[test]

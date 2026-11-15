@@ -28,7 +28,7 @@ fn session(dir: &tempfile::TempDir, pid: u32) -> Session {
 fn shows_sidebar_nav() {
     let dir = tempfile::tempdir().unwrap();
     let h = harness(TrackerApp::new_for_test(session(&dir, 1)));
-    for label in ["Summary", "Sections", "Personnel", "Audit log", "Settings"] {
+    for label in ["Summary", "Sections", "Personnel", "History", "Settings"] {
         h.get_by_role_and_label(egui::accesskit::Role::Button, label);
     }
     assert!(h.query_by_label("Competency Tracker").is_some());
@@ -309,11 +309,112 @@ fn fonts_register_serif_and_medium_and_headings_render() {
         .ctx
         .fonts(|f| f.definitions().families[&egui::FontFamily::Proportional][0].clone());
     assert_eq!(regular, "Inter-Regular");
-    // The Summary page title is a serif heading and must render without panicking.
-    assert!(
-        h.query_all_by_label("Summary").count() >= 2,
-        "sidebar entry and serif page title"
+    // Pages carry no title of their own: the sidebar names them.
+    assert_eq!(h.query_all_by_label("Summary").count(), 1);
+}
+
+#[test]
+fn window_buttons_replace_the_title_bar() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(TrackerApp::new_for_test(session(&dir, 1)));
+    button(&h, "Minimize").click();
+    h.step();
+    assert!(root_commands(&h)
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Minimized(true))));
+    button(&h, "Maximize").click();
+    h.step();
+    assert!(root_commands(&h)
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Maximized(true))));
+    button(&h, "Close window").click();
+    h.step();
+    assert!(root_commands(&h)
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Close)));
+}
+
+#[test]
+fn title_bar_shows_presence_and_toggles_editing_in_both_sidebar_widths() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(TrackerApp::new_for_test(session(&dir, 1)));
+    h.run();
+    h.get_by_label("tester \u{b7} Editing");
+    // No idle timer is shown any more.
+    assert!(h.query_by_label_contains("Editing stops in").is_none());
+    button(&h, "Collapse sidebar").click();
+    h.run();
+    // The controls live in the title bar, so collapsing changes nothing.
+    h.get_by_label("Switch to dark mode");
+    button(&h, "Stop editing").click();
+    h.run();
+    assert!(!h.state().session().is_editing());
+    h.get_by_label("tester \u{b7} Viewing");
+    button(&h, "Start editing").click();
+    h.run();
+    assert!(h.state().session().is_editing());
+}
+
+#[test]
+fn merge_two_people_keeps_both_competencies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    go_personnel(&mut h);
+    tick(&mut h, 0); // the header box: both
+    h.get_by_label("2 people selected");
+    button(&h, "Merge").click();
+    h.run();
+    h.get_by_label("Merge 2 people");
+    h.get_by_label("Keep Bram").click();
+    h.run();
+    button(&h, "Merge into Bram").click();
+    h.run();
+    let data = h.state().session().data();
+    assert_eq!(data.staff.len(), 1);
+    let bram = &data.staff[0];
+    assert_eq!(bram.name, "Bram");
+    assert!(bram.assignments.contains_key("t-cobas"));
+    assert!(bram.assignments.contains_key("t-arch"));
+    assert_eq!(
+        data.records
+            .iter()
+            .filter(|r| r.staff_id == "p-bram")
+            .count(),
+        2
     );
+    assert!(h.query_by_label("Merge 2 people").is_none());
+}
+
+#[test]
+fn all_sections_is_one_table_grouped_by_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        let test = |id: &str, name: &str| TestSystem {
+            id: id.into(),
+            name: name.into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        };
+        d.sections[0].tests = vec![test("t-cobas", "Cobas")];
+        d.sections[1].tests = vec![test("t-sysmex", "Sysmex")];
+        d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
+        d.staff.push(staff("p-bram", "Bram", "MLT", "t-sysmex"));
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    button(&h, "Sections").click();
+    h.run();
+    button(&h, "All sections").click();
+    h.run();
+    // One table: both sections' columns, one row per person.
+    h.get_by_label("Agnes \u{b7} Cobas");
+    h.get_by_label("Bram \u{b7} Sysmex");
+    // Each person also has a cell under the other section's test.
+    h.get_by_label("Agnes \u{b7} Sysmex");
+    h.get_by_label("Bram \u{b7} Cobas");
 }
 
 #[test]
@@ -721,23 +822,127 @@ fn status_of(h: &Harness<'static, TrackerApp>, id: &str) -> Option<StaffStatus> 
 }
 
 #[test]
-fn hide_staff_removes_from_summary() {
+fn remove_staff_removes_from_summary() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
     h.get_by_label("Agnes");
     go_personnel(&mut h);
+    assert!(!has_button(&h, "Hidden"), "no Hidden tab");
     button(&h, "Actions for Agnes").click();
     h.run();
-    button(&h, "Hide").click();
+    assert!(!has_button(&h, "Hide"), "no Hide option");
+    button(&h, "Remove").click();
     h.run();
-    assert_eq!(status_of(&h, "p-agnes"), Some(StaffStatus::Hidden));
+    assert_eq!(status_of(&h, "p-agnes"), Some(StaffStatus::Removed));
     button(&h, "Summary").click();
     h.run();
     assert!(
         h.query_by_label("Agnes").is_none(),
-        "hidden staff vanish from the summary"
+        "removed staff vanish from the summary"
     );
     h.get_by_label("Everyone is up to date");
+}
+
+/// Ticks the `index`th checkbox on the page (row checkboxes have no text).
+fn tick(h: &mut Harness<'static, TrackerApp>, index: usize) {
+    h.query_all_by_role(egui::accesskit::Role::CheckBox)
+        .nth(index)
+        .expect("checkbox")
+        .click();
+    h.run();
+}
+
+#[test]
+fn batch_remove_restore_and_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    go_personnel(&mut h);
+    // Header checkbox first, then Agnes, Bram.
+    tick(&mut h, 0);
+    h.get_by_label("2 people selected");
+    button(&h, "Remove").click();
+    h.run();
+    assert_eq!(status_of(&h, "p-agnes"), Some(StaffStatus::Removed));
+    assert_eq!(status_of(&h, "p-bram"), Some(StaffStatus::Removed));
+    assert!(
+        h.query_by_label_contains("selected").is_none(),
+        "selection cleared"
+    );
+
+    button(&h, "Removed").click();
+    h.run();
+    tick(&mut h, 2); // Bram
+    h.get_by_label("1 person selected");
+    button(&h, "Restore").click();
+    h.run();
+    assert_eq!(status_of(&h, "p-bram"), Some(StaffStatus::Active));
+
+    tick(&mut h, 1); // Agnes, the only one left here
+    button(&h, "Delete permanently").click();
+    h.run();
+    h.get_by_label("Type delete to confirm");
+    assert!(button(&h, "Delete 1 person").accesskit_node().is_disabled());
+    h.event(egui::Event::Text("delete".into()));
+    h.run();
+    button(&h, "Delete 1 person").click();
+    h.run();
+    assert_eq!(status_of(&h, "p-agnes"), None);
+    assert_eq!(status_of(&h, "p-bram"), Some(StaffStatus::Active));
+}
+
+#[test]
+fn batch_assign_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    go_personnel(&mut h);
+    tick(&mut h, 1); // Agnes
+    h.get_by_label_contains("Assign section").click();
+    h.run();
+    button(&h, "Chemistry").click();
+    h.run();
+    let data = h.state().session().data();
+    let agnes = data.staff.iter().find(|s| s.id == "p-agnes").unwrap();
+    assert_eq!(agnes.assignments.len(), 2, "both Chemistry tests");
+}
+
+#[test]
+fn all_sections_lists_every_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        let test = |id: &str, name: &str| TestSystem {
+            id: id.into(),
+            name: name.into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        };
+        d.sections[0].tests = vec![test("t-cobas", "Cobas")];
+        d.sections[1].tests = vec![test("t-ruby", "Ruby")];
+        d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
+        d.staff.push(staff("p-cara", "Cara", "MLT", "t-ruby"));
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    button(&h, "Sections").click();
+    h.run();
+    assert!(
+        h.query_by_label("Cara \u{b7} Ruby").is_none(),
+        "one section at first"
+    );
+    button(&h, "All sections").click();
+    h.run();
+    h.get_by_label("Agnes \u{b7} Cobas");
+    h.get_by_label("Cara \u{b7} Ruby");
+    // A test system filter narrows to its column and the people in it.
+    h.get_by_label_contains("Test system").click();
+    h.run();
+    h.get_by_label("Ruby \u{b7} Haematology").click();
+    h.run();
+    assert!(h.query_by_label("Agnes \u{b7} Cobas").is_none());
+    assert!(h.query_by_label("Agnes \u{b7} Ruby").is_none());
+    h.get_by_label("Cara \u{b7} Ruby");
 }
 
 #[test]
@@ -875,7 +1080,7 @@ fn audit_filter_by_user() {
     .unwrap();
     let mut h = harness(TrackerApp::new_for_test(s));
     h.run();
-    button(&h, "Audit log").click();
+    button(&h, "History").click();
     h.run();
     h.get_by_label("Added Bob to personnel");
     h.get_by_label("Added Cara to personnel");

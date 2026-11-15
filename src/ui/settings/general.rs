@@ -40,6 +40,16 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut GeneralTab) {
             if ui.add_enabled(dirty, Button::new("Revert")).clicked() {
                 *draft = saved.clone();
             }
+            let defaults = Settings::default();
+            let reset = ui
+                .add_enabled(
+                    editing && *draft != defaults,
+                    Button::new("Reset to defaults"),
+                )
+                .on_hover_text("Fills in the default values; nothing changes until you save.");
+            if reset.clicked() {
+                *draft = defaults;
+            }
         });
     });
     if save {
@@ -81,13 +91,28 @@ fn fields(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings) {
             );
             ui.end_row();
 
-            ui.label("Inactivity timeout");
+            ui.label("Inactivity prompt after");
             ui.add(
                 DragValue::new(&mut s.inactivity_minutes)
+                    .range(1..=240)
+                    .suffix(" min"),
+            );
+            hint(
+                ui,
+                "Asks \u{201c}Are you still editing?\u{201d} after this long without activity.",
+            );
+            ui.end_row();
+
+            ui.label("Prompt countdown");
+            ui.add(
+                DragValue::new(&mut s.inactivity_grace_minutes)
                     .range(1..=120)
                     .suffix(" min"),
             );
-            hint(ui, "Editing stops after this long without activity.");
+            hint(
+                ui,
+                "Editing stops if nobody answers the prompt within this time.",
+            );
             ui.end_row();
 
             ui.label("Initial due");

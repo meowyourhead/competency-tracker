@@ -56,7 +56,10 @@ fn options(renderer: eframe::Renderer) -> eframe::NativeOptions {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(TITLE)
         .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([960.0, 600.0]);
+        .with_min_inner_size([960.0, 600.0])
+        // The app draws its own minimise / maximise / close buttons.
+        .with_decorations(false)
+        .with_resizable(true);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app.png")) {
         viewport = viewport.with_icon(icon);
     }

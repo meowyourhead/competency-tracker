@@ -202,6 +202,224 @@ pub fn empty_state(ui: &mut Ui, title: &str, body: &str) {
     });
 }
 
+/// A selectable option (segmented controls, result lists). Unlike egui's
+/// selectable button, its size is the same in every state, so hovering never
+/// nudges it or its neighbours. `full_width` left-aligns it across the row.
+pub fn choice(
+    ui: &mut Ui,
+    pal: &Palette,
+    selected: bool,
+    text: &str,
+    full_width: bool,
+) -> egui::Response {
+    let pad = ui.spacing().button_padding;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let fg = if selected { pal.accent } else { pal.text };
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, fg);
+    let mut size = galley.size() + 2.0 * pad;
+    size.y = size.y.max(ui.spacing().interact_size.y);
+    if full_width {
+        size.x = size.x.max(ui.available_width());
+    }
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            pal.accent.gamma_multiply(0.18)
+        } else if resp.hovered() || resp.has_focus() {
+            pal.border
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+        let pos = if full_width {
+            egui::pos2(rect.left() + pad.x, rect.center().y - galley.size().y / 2.0)
+        } else {
+            rect.center() - galley.size() / 2.0
+        };
+        ui.painter().galley(pos, galley, fg);
+    }
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, text));
+    resp
+}
+
+/// A segmented control: a tinted track holding one [`choice`] per label.
+/// Returns the index clicked this frame (also when already selected).
+pub fn segmented(ui: &mut Ui, pal: &Palette, current: usize, labels: &[&str]) -> Option<usize> {
+    let mut picked = None;
+    egui::Frame::new()
+        .fill(pal.sidebar)
+        .stroke(Stroke::new(1.0, pal.border))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::same(3))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+                for (i, label) in labels.iter().enumerate() {
+                    if choice(ui, pal, i == current, label, false).clicked() {
+                        picked = Some(i);
+                    }
+                }
+            });
+        });
+    picked
+}
+
+/// A title-bar button (minimise, maximise, close), flush with the window
+/// edge like the system ones. `danger` turns the hover red (close).
+pub fn window_button(
+    ui: &mut Ui,
+    pal: &Palette,
+    glyph: &str,
+    label: &str,
+    danger: bool,
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(46.0, ui.available_height()), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, fg) = match (resp.hovered(), danger) {
+            (true, true) => (hex_close(resp.is_pointer_button_down_on()), Color32::WHITE),
+            (true, false) => (pal.border, pal.text),
+            _ => (Color32::TRANSPARENT, pal.text),
+        };
+        ui.painter().rect_filled(rect, 0, fill);
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(15.0),
+            fg,
+        );
+    }
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+    resp.on_hover_text(label)
+}
+
+/// Windows' own close-button red, a little darker while pressed.
+fn hex_close(pressed: bool) -> Color32 {
+    if pressed {
+        Color32::from_rgb(0x94, 0x1F, 0x14)
+    } else {
+        Color32::from_rgb(0xC4, 0x2B, 0x1C)
+    }
+}
+
+/// The title bar's presence capsule: a status dot, the user's name and
+/// "Editing" / "Viewing", joined to the button that switches between them.
+/// While editing, the capsule carries an accent tint and the button is quiet
+/// ("Stop editing"); while viewing, the capsule is neutral and the button is
+/// the accent call to action ("Start editing"). Returns the button's response.
+pub fn presence(
+    ui: &mut Ui,
+    pal: &Palette,
+    user: &str,
+    editing: bool,
+    can_toggle: bool,
+) -> egui::Response {
+    const H: f32 = 30.0;
+    const PAD: f32 = 12.0;
+    let status = if editing { "Editing" } else { "Viewing" };
+    let action = if editing {
+        "Stop editing"
+    } else {
+        "Start editing"
+    };
+    let name_g = ui.painter().layout_no_wrap(
+        user.to_owned(),
+        FontId::new(13.5, crate::ui::theme::medium()),
+        pal.text,
+    );
+    let status_color = if editing { pal.accent } else { pal.muted };
+    let status_g =
+        ui.painter()
+            .layout_no_wrap(status.to_owned(), FontId::proportional(13.0), status_color);
+    let action_g = ui.painter().layout_no_wrap(
+        action.to_owned(),
+        FontId::new(13.0, crate::ui::theme::medium()),
+        pal.text,
+    );
+    let info_w = PAD + 8.0 + 8.0 + name_g.size().x + 8.0 + status_g.size().x + PAD;
+    let button_w = PAD + action_g.size().x + PAD;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(info_w + button_w, H), Sense::hover());
+    let info = Rect::from_min_size(rect.min, Vec2::new(info_w, H));
+    let button = Rect::from_min_max(egui::pos2(info.right(), rect.top()), rect.max);
+    let enabled = can_toggle;
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let resp = ui.interact(button, ui.id().with("presence_toggle"), sense);
+    let who = ui.interact(info, ui.id().with("presence_info"), Sense::hover());
+    who.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::Label, true, format!("{user} \u{b7} {status}"))
+    });
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let pill = CornerRadius::same((H / 2.0) as u8);
+        let (fill, stroke) = if editing {
+            (
+                pal.accent.gamma_multiply(0.10),
+                Stroke::new(1.0, pal.accent.gamma_multiply(0.45)),
+            )
+        } else {
+            (pal.card, Stroke::new(1.0, pal.border))
+        };
+        p.rect(rect, pill, fill, stroke, StrokeKind::Inside);
+        // The button half: accent when it invites, quiet when it stops.
+        let right = CornerRadius {
+            nw: 0,
+            sw: 0,
+            ne: pill.ne,
+            se: pill.se,
+        };
+        let hovered = enabled && resp.hovered();
+        let (bfill, bfg) = match (editing, enabled) {
+            (_, false) => (Color32::TRANSPARENT, pal.muted),
+            (false, true) if hovered => (pal.accent.gamma_multiply(0.85), Color32::WHITE),
+            (false, true) => (pal.accent, Color32::WHITE),
+            (true, true) if hovered => (pal.accent.gamma_multiply(0.18), pal.text),
+            (true, true) => (Color32::TRANSPARENT, pal.text),
+        };
+        p.rect_filled(button.shrink(1.0), right, bfill);
+        if editing || !enabled {
+            p.vline(
+                button.left(),
+                button.y_range().shrink(7.0),
+                Stroke::new(1.0, stroke.color),
+            );
+        }
+        let mid = rect.center().y;
+        let dot = egui::pos2(info.left() + PAD + 4.0, mid);
+        if editing {
+            p.circle_filled(dot, 6.0, pal.accent.gamma_multiply(0.22));
+        }
+        p.circle_filled(dot, 3.5, if editing { pal.accent } else { pal.muted });
+        let mut x = dot.x + 4.0 + 8.0;
+        let name_w = name_g.size().x;
+        p.galley(egui::pos2(x, mid - name_g.size().y / 2.0), name_g, pal.text);
+        x += name_w + 8.0;
+        p.galley(
+            egui::pos2(x, mid - status_g.size().y / 2.0),
+            status_g,
+            status_color,
+        );
+        p.galley_with_override_text_color(
+            egui::pos2(
+                button.center().x - action_g.size().x / 2.0,
+                mid - action_g.size().y / 2.0,
+            ),
+            action_g,
+            bfg,
+        );
+    }
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, action));
+    if enabled {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp.on_hover_text("Editing isn't available right now")
+    }
+}
+
 /// A square, borderless button showing a Phosphor icon; `label` is its
 /// tooltip and accessible name.
 pub fn icon_button(ui: &mut Ui, pal: &Palette, glyph: &str, label: &str) -> egui::Response {
