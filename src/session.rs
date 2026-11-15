@@ -15,7 +15,7 @@ use crate::dates::now_ts;
 use crate::lock::{self, Acquire, LockInfo, HEARTBEAT_SECS};
 use crate::model::{AuditEntry, Data, Ts};
 use crate::ops::Actor;
-use crate::snapshot::{self, DataDir, Loaded};
+use crate::snapshot::{self, DataDir, Loaded, Newest, ScanCache};
 
 pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_secs(3);
 pub const POLL_EVERY: Duration = Duration::from_secs(10);
@@ -90,6 +90,11 @@ pub struct Session {
     pending: Vec<SessionEvent>,
     /// Where `abandon` writes unsaved data (`%LOCALAPPDATA%\CompetencyTracker\rescue`).
     rescue_dir: PathBuf,
+    /// Remembers the snapshot files already read, so polls only read changes.
+    scan: ScanCache,
+    /// The newest snapshot as last seen (loaded, saved by us, or judged not
+    /// newer than ours); a poll that finds it unchanged parses nothing.
+    seen: Option<Newest>,
     /// Interval of the background heartbeat thread; `None` = beat from `tick`.
     heartbeat_every: Option<Duration>,
     /// Running while Editing (when `heartbeat_every` is set and it could start).
@@ -239,6 +244,8 @@ impl Session {
             available_announced: false,
             pending: Vec::new(),
             rescue_dir: default_rescue_dir(),
+            scan: ScanCache::default(),
+            seen: None,
             heartbeat_every,
             heartbeat: None,
         };
@@ -432,6 +439,8 @@ impl Session {
         match snapshot::save_snapshot(&self.dir, &self.data, &self.file_name(now)) {
             Ok(path) => {
                 self.base_saved_at = Some(stamp);
+                // Our own file is now the newest: later polls need not parse it.
+                self.seen = self.scan.note_saved(&self.dir, &path, stamp);
                 self.dirty = false;
                 self.dirty_since = None;
                 self.placeholder = false;
@@ -497,6 +506,11 @@ impl Session {
     #[cfg(test)]
     fn set_rescue_dir(&mut self, dir: PathBuf) {
         self.rescue_dir = dir;
+    }
+
+    #[cfg(test)]
+    fn scan_reads(&self) -> u64 {
+        self.scan.reads()
     }
 
     #[cfg(test)]
@@ -580,21 +594,24 @@ impl Session {
     /// or ours is a placeholder) and returns whether it did. On error keeps
     /// the data and sets `load_error`.
     fn load(&mut self, force: bool) -> io::Result<bool> {
-        let found = match snapshot::load_latest(&self.dir) {
-            Ok(found) => found,
+        // Unchanged since we last saw it: nothing to parse.
+        let have = if force || self.placeholder { None } else { self.seen.as_ref() };
+        let latest = match self.scan.load_latest(&self.dir, have) {
+            Ok(latest) => latest,
             Err(e) => {
                 self.load_error = Some(format!("Could not read the data folder: {e}"));
                 return Err(e);
             }
         };
         self.load_error = None;
-        let Some(loaded) = found else { return Ok(false) };
+        self.corrupt = latest.corrupt;
+        self.seen = latest.newest;
+        let Some(loaded) = latest.loaded else { return Ok(false) };
         let wanted = force || self.placeholder || loaded.data.saved_at > self.data.saved_at;
         if wanted && !self.unrescued {
             self.adopt(loaded);
             return Ok(true);
         }
-        self.corrupt = loaded.corrupt;
         Ok(false)
     }
 
@@ -930,6 +947,35 @@ mod tests {
         assert!(!dir.lock_path().exists());
         // Announced once per transition.
         assert!(b.tick(at(20), clock.at(20)).is_empty());
+    }
+
+    #[test]
+    fn viewer_polls_read_only_changed_snapshots() {
+        let (_t, dir, clock) = setup();
+        let mut a = open(&dir, "jtan", 1, &clock);
+        change(&mut a, at(1));
+        a.save_now(at(1)).unwrap();
+        let mut b = open(&dir, "agnes", 2, &clock);
+        assert_eq!(b.data().settings.due_soon_days, 45);
+        let reads = b.scan_reads();
+        // Nothing new: polls read no files at all.
+        b.tick(at(10), clock.at(10));
+        b.tick(at(20), clock.at(20));
+        assert_eq!(b.scan_reads(), reads);
+        // A new save: read once (parsed with the cache entry), then adopted.
+        a.mutate(at(21), |d, _| d.settings.due_soon_days = 50).unwrap();
+        a.save_now(at(21)).unwrap();
+        let ev = b.tick(at(30), clock.at(30));
+        assert!(ev.contains(&SessionEvent::Reloaded), "{ev:?}");
+        assert_eq!(b.data().settings.due_soon_days, 50);
+        assert_eq!(b.scan_reads(), reads + 1);
+        b.tick(at(40), clock.at(40));
+        assert_eq!(b.scan_reads(), reads + 1);
+        // The editor's own save is remembered: after stopping, its polls read nothing.
+        a.stop_editing(at(41)).unwrap();
+        let a_reads = a.scan_reads();
+        a.tick(at(60), clock.at(60));
+        assert_eq!(a.scan_reads(), a_reads);
     }
 
     #[test]

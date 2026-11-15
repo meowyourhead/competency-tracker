@@ -1,12 +1,13 @@
-﻿use std::fs;
+﻿use std::collections::HashMap;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chrono::NaiveDate;
 
 use crate::dates::fmt_date;
-use crate::model::{Data, SCHEMA_VERSION};
+use crate::model::{Data, Ts, SCHEMA_VERSION};
 
 const CONFIG_FILE: &str = "tracker.config.json";
 const DEFAULT_DIR: &str = "CompetencyData";
@@ -153,12 +154,13 @@ pub struct Loaded {
     pub read_only_newer_schema: bool,
 }
 
+/// Parsed snapshots and the paths of unparseable ones.
+type ScanResult = (Vec<(PathBuf, Data)>, Vec<PathBuf>);
+
 /// Every `*.json` directly in the snapshots folder, parsed. Unparseable files
 /// are returned separately. A candidate that still cannot be *read* after
 /// retries is an error, so an older snapshot never loads silently in its place;
 /// one that vanished since the listing is skipped.
-type ScanResult = (Vec<(PathBuf, Data)>, Vec<PathBuf>);
-
 fn scan(dir: &DataDir) -> io::Result<ScanResult> {
     let mut good = Vec::new();
     let mut corrupt = Vec::new();
@@ -188,15 +190,170 @@ fn scan(dir: &DataDir) -> io::Result<ScanResult> {
     Ok((good, corrupt))
 }
 
+/// One snapshot file as listed. The same path, length and modified time are
+/// taken to mean the same contents (snapshots are replaced by rename).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileKey {
+    pub path: PathBuf,
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+}
+
+/// The snapshot with the newest `saved_at`, as found by [`ScanCache::load_latest`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Newest {
+    pub key: FileKey,
+    pub saved_at: Ts,
+}
+
+/// What [`ScanCache::load_latest`] found.
+#[derive(Debug)]
+pub struct Latest {
+    pub newest: Option<Newest>,
+    /// The newest snapshot, fully loaded; `None` when it is the one the caller already has.
+    pub loaded: Option<Loaded>,
+    pub corrupt: Vec<PathBuf>,
+}
+
+/// Remembers each snapshot file's `saved_at` (or that it does not parse) by
+/// [`FileKey`], so a poll only reads files that are new or changed.
+#[derive(Debug, Default)]
+pub struct ScanCache {
+    files: HashMap<PathBuf, (FileKey, Option<Ts>)>,
+    reads: u64,
+}
+
+/// How often [`ScanCache::load_latest`] rescans when the winner changes under it.
+const SCAN_ATTEMPTS: u32 = 3;
+
+impl ScanCache {
+    /// How many snapshot files were read so far.
+    pub fn reads(&self) -> u64 {
+        self.reads
+    }
+
+    /// Finds the snapshot with the newest `saved_at`, reading only new or
+    /// changed files, and fully loads it unless it is `have`.
+    ///
+    /// A listed file that still cannot be *read* after retries is an error, so
+    /// an older snapshot never loads silently in its place; one that vanished
+    /// since the listing is skipped; one that does not parse is `corrupt`.
+    pub fn load_latest(&mut self, dir: &DataDir, have: Option<&Newest>) -> io::Result<Latest> {
+        let mut attempt = 1;
+        loop {
+            match self.try_load_latest(dir, have)? {
+                Some(latest) => return Ok(latest),
+                // The winner vanished or changed between the scan and its load.
+                None if attempt < SCAN_ATTEMPTS => attempt += 1,
+                None => return Err(io::Error::other("The newest snapshot kept changing while it was loaded")),
+            }
+        }
+    }
+
+    /// One scan; `None` when the winner could not be loaded after all.
+    fn try_load_latest(&mut self, dir: &DataDir, have: Option<&Newest>) -> io::Result<Option<Latest>> {
+        let keys = list_snapshots(dir)?;
+        self.files.retain(|path, _| keys.iter().any(|k| k.path == *path));
+        let mut corrupt = Vec::new();
+        // The best so far, with its data when it was parsed during this scan.
+        let mut best: Option<(Newest, Option<Data>)> = None;
+        for key in keys {
+            let (saved_at, fresh) = match self.files.get(&key.path) {
+                Some((cached, saved_at)) if *cached == key => (*saved_at, None),
+                _ => {
+                    let Some(bytes) = self.read(&key.path)? else { continue };
+                    let parsed = serde_json::from_slice::<Data>(&bytes).ok();
+                    let saved_at = parsed.as_ref().map(|d| d.saved_at);
+                    self.files.insert(key.path.clone(), (key.clone(), saved_at));
+                    (saved_at, parsed)
+                }
+            };
+            let Some(saved_at) = saved_at else {
+                corrupt.push(key.path);
+                continue;
+            };
+            // Paths are sorted; on a tie the later one wins.
+            if best.as_ref().is_none_or(|(b, _)| saved_at >= b.saved_at) {
+                best = Some((Newest { key, saved_at }, fresh));
+            }
+        }
+        let Some((newest, fresh)) = best else {
+            return Ok(Some(Latest { newest: None, loaded: None, corrupt }));
+        };
+        if have == Some(&newest) {
+            return Ok(Some(Latest { newest: Some(newest), loaded: None, corrupt }));
+        }
+        let data = match fresh {
+            Some(d) => d,
+            None => match self.read(&newest.key.path)?.and_then(|b| serde_json::from_slice::<Data>(&b).ok()) {
+                Some(d) => d,
+                None => {
+                    self.files.remove(&newest.key.path);
+                    return Ok(None);
+                }
+            },
+        };
+        let loaded = loaded(data, newest.key.path.clone(), corrupt.clone());
+        let newest = Newest { saved_at: loaded.data.saved_at, ..newest };
+        Ok(Some(Latest { newest: Some(newest), loaded: Some(loaded), corrupt }))
+    }
+
+    /// Records a snapshot we just wrote, so the next scan need not read it.
+    /// Returns it as the newest. The key comes from a folder listing, like a
+    /// scan's (a listing's times can differ from the file's own metadata).
+    pub fn note_saved(&mut self, dir: &DataDir, path: &Path, saved_at: Ts) -> Option<Newest> {
+        let key = list_snapshots(dir).ok()?.into_iter().find(|k| k.path == path)?;
+        self.files.insert(key.path.clone(), (key.clone(), Some(saved_at)));
+        Some(Newest { key, saved_at })
+    }
+
+    /// Reads a snapshot (with retries). `Ok(None)` when it vanished.
+    fn read(&mut self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        self.reads += 1;
+        match retry_io(|| fs::read(path), |e| e.kind() != io::ErrorKind::NotFound) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
+        }
+    }
+}
+
+/// Every `*.json` directly in the snapshots folder with its length and
+/// modified time, sorted by path.
+fn list_snapshots(dir: &DataDir) -> io::Result<Vec<FileKey>> {
+    let entries = match fs::read_dir(dir.snapshots()) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut keys = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("json")) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        // A directory named *.json is never cached: its read fails every time.
+        keys.push(FileKey { path, len: meta.len(), modified: meta.modified().ok() });
+    }
+    keys.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(keys)
+}
+
+fn loaded(mut data: Data, path: PathBuf, corrupt: Vec<PathBuf>) -> Loaded {
+    data.ensure_valid();
+    let read_only_newer_schema = data.schema_version > SCHEMA_VERSION;
+    Loaded { data, path, corrupt, read_only_newer_schema }
+}
+
 /// Loads the snapshot with the newest `saved_at`.
 pub fn load_latest(dir: &DataDir) -> io::Result<Option<Loaded>> {
-    let (good, corrupt) = scan(dir)?;
-    let best = good.into_iter().max_by_key(|(_, d)| d.saved_at);
-    Ok(best.map(|(path, mut data)| {
-        data.ensure_valid();
-        let read_only_newer_schema = data.schema_version > SCHEMA_VERSION;
-        Loaded { data, path, corrupt, read_only_newer_schema }
-    }))
+    ScanCache::default().load_latest(dir, None).map(|l| l.loaded)
 }
 
 /// Moves snapshots older than `keep_days` into the archive folder; the newest
@@ -337,6 +494,77 @@ mod tests {
         let loaded = load_latest(&dir).unwrap().unwrap();
         assert_eq!(loaded.data.saved_by, "older");
         assert_eq!(loaded.corrupt, vec![dir.snapshots().join("x.json")]);
+    }
+
+    #[test]
+    fn scan_cache_reads_only_new_or_changed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = dir_in(&tmp);
+        save_snapshot(&dir, &data_at(ts(2026, 11, 10), "a"), "a.json").unwrap();
+        save_snapshot(&dir, &data_at(ts(2026, 11, 12), "b"), "b.json").unwrap();
+        let mut cache = ScanCache::default();
+        let first = cache.load_latest(&dir, None).unwrap();
+        assert_eq!(cache.reads(), 2, "each file read once; the winner is not read again");
+        assert_eq!(first.loaded.as_ref().unwrap().data.saved_by, "b");
+        let newest = first.newest.clone().unwrap();
+        assert_eq!(newest.saved_at, ts(2026, 11, 12));
+        assert_eq!(newest.key.path, dir.snapshots().join("b.json"));
+
+        // Nothing changed and the caller already has the winner: no reads at all.
+        let again = cache.load_latest(&dir, Some(&newest)).unwrap();
+        assert_eq!(cache.reads(), 2);
+        assert!(again.loaded.is_none());
+        assert_eq!(again.newest.as_ref(), Some(&newest));
+
+        // Without it, only the winner is read.
+        let full = cache.load_latest(&dir, None).unwrap();
+        assert_eq!(cache.reads(), 3);
+        assert_eq!(full.loaded.unwrap().data.saved_by, "b");
+
+        // A new file: only it is read, and it wins.
+        save_snapshot(&dir, &data_at(ts(2026, 11, 14), "c"), "c.json").unwrap();
+        let newer = cache.load_latest(&dir, Some(&newest)).unwrap();
+        assert_eq!(cache.reads(), 4);
+        assert_eq!(newer.loaded.unwrap().data.saved_by, "c");
+
+        // A changed file (same name, new contents) is read again.
+        let c = newer.newest.unwrap();
+        let mut c2 = data_at(ts(2026, 11, 15), "c");
+        c2.settings.due_soon_days = 7;
+        save_snapshot(&dir, &c2, "c.json").unwrap();
+        set_mtime(&dir.snapshots().join("c.json"), 3_000_000);
+        let changed = cache.load_latest(&dir, Some(&c)).unwrap();
+        assert_eq!(cache.reads(), 5);
+        assert_eq!(changed.loaded.unwrap().data.settings.due_soon_days, 7);
+
+        // A corrupt file is read once, then remembered as corrupt.
+        let bad = dir.snapshots().join("x.json");
+        fs::write(&bad, "{ nope").unwrap();
+        let newest = cache.load_latest(&dir, None).unwrap().newest.unwrap();
+        assert_eq!(cache.reads(), 7, "x.json plus the winner");
+        let l = cache.load_latest(&dir, Some(&newest)).unwrap();
+        assert_eq!(cache.reads(), 7);
+        assert_eq!(l.corrupt, vec![bad]);
+    }
+
+    #[test]
+    fn scan_cache_keeps_read_errors_and_forgets_removed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = dir_in(&tmp);
+        save_snapshot(&dir, &data_at(ts(2026, 11, 10), "older"), "older.json").unwrap();
+        save_snapshot(&dir, &data_at(ts(2026, 11, 12), "newer"), "newer.json").unwrap();
+        let mut cache = ScanCache::default();
+        assert_eq!(cache.load_latest(&dir, None).unwrap().loaded.unwrap().data.saved_by, "newer");
+        // An unreadable candidate is still an error, every time.
+        fs::create_dir(dir.snapshots().join("x.json")).unwrap();
+        assert!(cache.load_latest(&dir, None).is_err());
+        assert!(cache.load_latest(&dir, None).is_err());
+        fs::remove_dir(dir.snapshots().join("x.json")).unwrap();
+        // The winner is deleted: the next-newest loads.
+        fs::remove_file(dir.snapshots().join("newer.json")).unwrap();
+        let l = cache.load_latest(&dir, None).unwrap();
+        assert_eq!(l.loaded.unwrap().data.saved_by, "older");
+        assert_eq!(l.newest.unwrap().key.path, dir.snapshots().join("older.json"));
     }
 
     #[test]
