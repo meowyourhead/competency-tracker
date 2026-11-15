@@ -2,12 +2,12 @@
 
 use std::time::Instant;
 
-use competency_tracker::dates::now_ts;
+use competency_tracker::dates::{fmt_date, now_ts};
 use competency_tracker::model::{AssignState, Assignment, Record, Staff, StaffStatus, TestSystem};
 use competency_tracker::session::Session;
 use competency_tracker::snapshot::DataDir;
 use competency_tracker::ui::app::TrackerApp;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 
 fn harness(app: TrackerApp) -> Harness<'static, TrackerApp> {
@@ -264,6 +264,117 @@ fn summary_no_data_state_reads_full_sentence() {
     let mut h = harness(TrackerApp::new_for_test(session(&dir, 1)));
     h.run();
     h.get_by_label("No data yet \u{2014} import your Excel tracker from Settings");
+}
+
+/// Goes to Sections (Chemistry is first) and clicks the grid cell named `cell`.
+fn open_cell(h: &mut Harness<'static, TrackerApp>, cell: &str) {
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sections").click();
+    h.run();
+    h.get_by_label(cell).click();
+    h.run();
+}
+
+#[test]
+fn grid_shows_pill_and_opens_detail() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sections").click();
+    h.run();
+    let done = now_ts().date_naive() - chrono::Days::new(365);
+    let due = fmt_date(done.checked_add_months(chrono::Months::new(6)).unwrap());
+    h.get_by_label(&due);
+    // Both people's next stage is Semi-annual: one label under each pill.
+    assert_eq!(h.query_all_by_label("Semi-annual").count(), 2, "stage label under the pill");
+    assert!(h.query_by_label("Bram \u{b7} Architect").is_some());
+    assert!(h.query_by_label("Close panel").is_none());
+    h.get_by_label("Agnes \u{b7} Cobas").click();
+    h.run();
+    h.get_by_label("Close panel");
+    h.get_by_label("Cobas \u{b7} Chemistry");
+}
+
+/// Agnes has six Cobas completions, one stage a year apart.
+fn six_completions(dir: &tempfile::TempDir) -> (Harness<'static, TrackerApp>, Vec<String>) {
+    let mut s = session(dir, 1);
+    let labels = ["Initial", "Semi-annual", "1st Annual", "2nd Annual", "3rd Annual", "4th Annual"];
+    let today = now_ts().date_naive();
+    let lines: Vec<String> = (0..6u64)
+        .map(|i| format!("{} \u{b7} {}", labels[i as usize], fmt_date(today - chrono::Days::new(2200 - i * 365))))
+        .collect();
+    s.mutate(now_ts(), |d, _| {
+        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
+        for i in 0..6u64 {
+            let mut r = initial("p-agnes", "t-cobas", 2200 - i * 365);
+            r.id = format!("r-{i}");
+            r.stage_index = i as u32;
+            r.stage_label = labels[i as usize].into();
+            d.records.push(r);
+        }
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    (h, lines)
+}
+
+#[test]
+fn detail_shows_four_then_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, lines) = six_completions(&dir);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    for line in &lines[2..] {
+        h.get_by_label(line);
+    }
+    for line in &lines[..2] {
+        assert!(h.query_by_label(line).is_none(), "{line} is hidden at first");
+    }
+    h.get_by_label("Show 2 older entries").click();
+    h.run();
+    for line in &lines {
+        h.get_by_label(line);
+    }
+    assert!(h.query_by_label("Show 2 older entries").is_none());
+}
+
+#[test]
+fn mark_complete_disabled_when_viewing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
+    })
+    .unwrap();
+    s.stop_editing(now_ts()).unwrap();
+    assert!(!s.is_editing());
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    let button = h.get_by_role_and_label(egui::accesskit::Role::Button, "Mark complete");
+    assert!(button.accesskit_node().is_disabled());
+}
+
+#[test]
+fn mark_complete_adds_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    let before = h.state().session().data().records.len();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Mark complete").click();
+    h.run();
+    let comment = h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).next().expect("comment box");
+    comment.click();
+    h.run();
+    h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).next().unwrap().type_text("Bench 2");
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save").click();
+    h.run();
+    let records = &h.state().session().data().records;
+    assert_eq!(records.len(), before + 1);
+    let added = records.last().unwrap();
+    assert_eq!((added.by.as_str(), added.stage_index, added.comment.as_str()), ("tester", 1, "Bench 2"));
+    assert_eq!(added.completed_on, now_ts().date_naive());
 }
 
 /// The Summary page's search box (the last text input in the tree).

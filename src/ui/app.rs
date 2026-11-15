@@ -177,22 +177,23 @@ impl TrackerApp {
             self.start_editing(now, inst);
         }
         let today = now.date_naive();
-        if self.open_detail.is_some() {
-            Panel::right("detail")
-                .default_size(420.0)
-                .frame(Frame::new().fill(pal.card).inner_margin(Margin::same(20)))
-                .show(ui, |ui| {
-                    let mut cx = Ctx {
-                        session: &mut self.session,
-                        pal: &pal,
-                        today,
-                        now,
-                        toasts: &mut self.toasts,
-                        open_detail: &mut self.open_detail,
-                    };
-                    detail::show(ui, &mut cx, &mut self.detail);
-                });
-        }
+        // Drawn on every page whenever a detail target is open; slides in and out.
+        let mut detail_open = self.open_detail.is_some();
+        Panel::right("detail")
+            .exact_size(420.0)
+            .resizable(false)
+            .frame(Frame::new().fill(pal.card).inner_margin(Margin::same(20)))
+            .show_collapsible(ui, &mut detail_open, |ui| {
+                let mut cx = Ctx {
+                    session: &mut self.session,
+                    pal: &pal,
+                    today,
+                    now,
+                    toasts: &mut self.toasts,
+                    open_detail: &mut self.open_detail,
+                };
+                detail::show(ui, &mut cx, &mut self.detail);
+            });
         CentralPanel::default()
             .frame(Frame::new().fill(pal.bg).inner_margin(Margin::symmetric(40, 28)))
             .show(ui, |ui| {

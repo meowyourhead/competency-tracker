@@ -26,6 +26,8 @@ egui = "=0.36.2"
 egui-phosphor = "=0.14.0"
 egui_extras = { version = "=0.36.2", features = ["datepicker"] }
 fuzzy-matcher = "=0.3.7"
+# Same version egui_extras' date picker already uses; needed to name its `Date`.
+jiff = { version = "=0.2.43", default-features = false }
 nanoid = "=0.5.0"
 rfd = "=0.18.0"
 rust_xlsxwriter = "=0.102.0"
