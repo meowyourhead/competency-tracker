@@ -27,11 +27,17 @@ impl<'a> Index<'a> {
     pub fn build(data: &'a Data) -> Index<'a> {
         let mut records: HashMap<PairKey, Vec<&'a Record>> = HashMap::new();
         for r in &data.records {
-            records.entry(key(&r.staff_id, &r.test_id)).or_default().push(r);
+            records
+                .entry(key(&r.staff_id, &r.test_id))
+                .or_default()
+                .push(r);
         }
         let mut skipped: HashMap<PairKey, Vec<u32>> = HashMap::new();
         for s in &data.skipped {
-            skipped.entry(key(&s.staff_id, &s.test_id)).or_default().push(s.stage_index);
+            skipped
+                .entry(key(&s.staff_id, &s.test_id))
+                .or_default()
+                .push(s.stage_index);
         }
         let mut overrides: HashMap<PairKey, &'a DueOverride> = HashMap::new();
         for o in &data.due_overrides {
@@ -42,7 +48,10 @@ impl<'a> Index<'a> {
         }
         let mut delay_notes: HashMap<PairKey, Vec<&'a DelayNote>> = HashMap::new();
         for n in &data.delay_notes {
-            delay_notes.entry(key(&n.staff_id, &n.test_id)).or_default().push(n);
+            delay_notes
+                .entry(key(&n.staff_id, &n.test_id))
+                .or_default()
+                .push(n);
         }
         let mut notes: HashMap<PairKey, Vec<&'a Note>> = HashMap::new();
         for n in &data.notes {
@@ -50,7 +59,14 @@ impl<'a> Index<'a> {
                 notes.entry(key(&n.staff_id, t)).or_default().push(n);
             }
         }
-        Index { records, skipped, overrides, delay_notes, notes, data }
+        Index {
+            records,
+            skipped,
+            overrides,
+            delay_notes,
+            notes,
+            data,
+        }
     }
 
     pub fn pair(&self, staff_id: &str, test_id: &str) -> PairState<'a> {
@@ -59,18 +75,26 @@ impl<'a> Index<'a> {
             records: self.records.get(&k).cloned().unwrap_or_default(),
             skipped: self.skipped.get(&k).cloned().unwrap_or_default(),
             override_: self.overrides.get(&k).copied(),
-            assigned_on: self.data.staff(staff_id).and_then(|s| s.assignments.get(test_id)).map(|a| a.since),
+            assigned_on: self
+                .data
+                .staff(staff_id)
+                .and_then(|s| s.assignments.get(test_id))
+                .map(|a| a.since),
         }
     }
 
     /// Delay notes for the pair, in data order.
     pub fn delay_notes(&self, staff_id: &str, test_id: &str) -> &[&'a DelayNote] {
-        self.delay_notes.get(&key(staff_id, test_id)).map_or(&[], |v| v.as_slice())
+        self.delay_notes
+            .get(&key(staff_id, test_id))
+            .map_or(&[], |v| v.as_slice())
     }
 
     /// Imported notes attached to the pair, in data order.
     pub fn notes(&self, staff_id: &str, test_id: &str) -> &[&'a Note] {
-        self.notes.get(&key(staff_id, test_id)).map_or(&[], |v| v.as_slice())
+        self.notes
+            .get(&key(staff_id, test_id))
+            .map_or(&[], |v| v.as_slice())
     }
 
     pub fn data(&self) -> &'a Data {
@@ -94,14 +118,25 @@ pub struct DueItem {
 
 pub fn due_items(data: &Data, idx: &Index, today: NaiveDate) -> Vec<DueItem> {
     let mut out = Vec::new();
-    for st in data.staff.iter().filter(|s| s.status == StaffStatus::Active) {
+    for st in data
+        .staff
+        .iter()
+        .filter(|s| s.status == StaffStatus::Active)
+    {
         for sec in data.sections.iter().filter(|s| !s.retired) {
             for t in sec.tests.iter().filter(|t| !t.retired) {
-                let assigned = st.assignments.get(&t.id).is_some_and(|a| a.state == AssignState::Assigned);
+                let assigned = st
+                    .assignments
+                    .get(&t.id)
+                    .is_some_and(|a| a.state == AssignState::Assigned);
                 if !assigned {
                     continue;
                 }
-                let info = next_due(data.rule_for_test(&t.id), &idx.pair(&st.id, &t.id), &data.settings);
+                let info = next_due(
+                    data.rule_for_test(&t.id),
+                    &idx.pair(&st.id, &t.id),
+                    &data.settings,
+                );
                 let status = classify(info.due_on, today, data.settings.due_soon_days);
                 let delay_note = idx
                     .delay_notes(&st.id, &t.id)
@@ -128,7 +163,11 @@ pub fn due_items(data: &Data, idx: &Index, today: NaiveDate) -> Vec<DueItem> {
         a.status
             .cmp(&b.status)
             .then_with(|| a.info.due_on.cmp(&b.info.due_on))
-            .then_with(|| a.staff_name.to_lowercase().cmp(&b.staff_name.to_lowercase()))
+            .then_with(|| {
+                a.staff_name
+                    .to_lowercase()
+                    .cmp(&b.staff_name.to_lowercase())
+            })
     });
     out
 }
@@ -191,7 +230,11 @@ pub fn filter_items<'a>(items: &'a [DueItem], f: &DueFilter) -> Vec<&'a DueItem>
         .iter()
         .filter(|i| f.section.as_ref().is_none_or(|s| *s == i.section_id))
         .filter(|i| f.test.as_ref().is_none_or(|t| *t == i.test_id))
-        .filter(|i| f.title.as_ref().is_none_or(|t| t.eq_ignore_ascii_case(&i.title)))
+        .filter(|i| {
+            f.title
+                .as_ref()
+                .is_none_or(|t| t.eq_ignore_ascii_case(&i.title))
+        })
         .filter(|i| match f.status {
             StatusFilter::All => true,
             StatusFilter::Overdue => i.status == DueStatus::Overdue,
@@ -209,7 +252,10 @@ pub fn filter_items<'a>(items: &'a [DueItem], f: &DueFilter) -> Vec<&'a DueItem>
         .collect()
 }
 
-fn group_by<'a>(items: &[&'a DueItem], id: impl Fn(&DueItem) -> &Id) -> Vec<(Id, Vec<&'a DueItem>)> {
+fn group_by<'a>(
+    items: &[&'a DueItem],
+    id: impl Fn(&DueItem) -> &Id,
+) -> Vec<(Id, Vec<&'a DueItem>)> {
     let mut groups: Vec<(Id, Vec<&'a DueItem>)> = Vec::new();
     let mut pos: HashMap<Id, usize> = HashMap::new();
     for &i in items {
@@ -268,8 +314,18 @@ pub const HISTORY_DEFAULT: usize = 4;
 pub fn history<'a>(data: &'a Data, staff_id: &str, test_id: &str) -> Vec<HistoryEntry<'a>> {
     let pair = |s: &str, t: &str| s == staff_id && t == test_id;
     let mut out: Vec<HistoryEntry<'a>> = Vec::new();
-    out.extend(data.records.iter().filter(|r| pair(&r.staff_id, &r.test_id)).map(HistoryEntry::Completion));
-    out.extend(data.delay_notes.iter().filter(|n| pair(&n.staff_id, &n.test_id)).map(HistoryEntry::Delay));
+    out.extend(
+        data.records
+            .iter()
+            .filter(|r| pair(&r.staff_id, &r.test_id))
+            .map(HistoryEntry::Completion),
+    );
+    out.extend(
+        data.delay_notes
+            .iter()
+            .filter(|n| pair(&n.staff_id, &n.test_id))
+            .map(HistoryEntry::Delay),
+    );
     out.extend(
         data.notes
             .iter()
@@ -286,7 +342,10 @@ pub fn history<'a>(data: &'a Data, staff_id: &str, test_id: &str) -> Vec<History
 }
 
 /// The visible slice and the number of hidden older entries.
-pub fn split_history<'a, 'b>(h: &'b [HistoryEntry<'a>], expanded: bool) -> (&'b [HistoryEntry<'a>], usize) {
+pub fn split_history<'a, 'b>(
+    h: &'b [HistoryEntry<'a>],
+    expanded: bool,
+) -> (&'b [HistoryEntry<'a>], usize) {
     if expanded || h.len() <= HISTORY_DEFAULT {
         (h, 0)
     } else {
@@ -309,10 +368,16 @@ pub fn search(data: &Data, q: &str, limit: usize) -> Vec<(SearchHit, String)> {
     let matcher = SkimMatcherV2::default().ignore_case();
     // Every whitespace-separated token must match; scores add up.
     let score = |label: &str| -> Option<i64> {
-        tokens.iter().try_fold(0i64, |acc, t| matcher.fuzzy_match(label, t).map(|s| acc + s))
+        tokens.iter().try_fold(0i64, |acc, t| {
+            matcher.fuzzy_match(label, t).map(|s| acc + s)
+        })
     };
     let mut hits: Vec<(i64, SearchHit, String)> = Vec::new();
-    for s in data.staff.iter().filter(|s| s.status == StaffStatus::Active) {
+    for s in data
+        .staff
+        .iter()
+        .filter(|s| s.status == StaffStatus::Active)
+    {
         if let Some(sc) = score(&s.name) {
             hits.push((sc, SearchHit::Staff(s.id.clone()), s.name.clone()));
         }
@@ -324,12 +389,22 @@ pub fn search(data: &Data, q: &str, limit: usize) -> Vec<(SearchHit, String)> {
         for t in sec.tests.iter().filter(|t| !t.retired) {
             let label = format!("{} \u{b7} {}", t.name, sec.name);
             if let Some(sc) = score(&label) {
-                hits.push((sc, SearchHit::Test { section_id: sec.id.clone(), test_id: t.id.clone() }, label));
+                hits.push((
+                    sc,
+                    SearchHit::Test {
+                        section_id: sec.id.clone(),
+                        test_id: t.id.clone(),
+                    },
+                    label,
+                ));
             }
         }
     }
     hits.sort_by_key(|a| std::cmp::Reverse(a.0));
-    hits.into_iter().take(limit).map(|(_, h, l)| (h, l)).collect()
+    hits.into_iter()
+        .take(limit)
+        .map(|(_, h, l)| (h, l))
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -347,11 +422,19 @@ pub fn filter_staff<'a>(data: &'a Data, f: &StaffFilter) -> Vec<&'a Staff> {
         .staff
         .iter()
         .filter(|s| s.status == status)
-        .filter(|s| f.title.as_ref().is_none_or(|t| t.eq_ignore_ascii_case(&s.title)))
+        .filter(|s| {
+            f.title
+                .as_ref()
+                .is_none_or(|t| t.eq_ignore_ascii_case(&s.title))
+        })
         .filter(|s| {
             f.section.as_ref().is_none_or(|sec| {
                 data.section(sec).is_some_and(|sec| {
-                    sec.tests.iter().any(|t| s.assignments.get(&t.id).is_some_and(|a| a.state == AssignState::Assigned))
+                    sec.tests.iter().any(|t| {
+                        s.assignments
+                            .get(&t.id)
+                            .is_some_and(|a| a.state == AssignState::Assigned)
+                    })
                 })
             })
         })
@@ -380,9 +463,21 @@ pub fn filter_audit<'a>(data: &'a Data, f: &AuditFilter) -> Vec<&'a AuditEntry> 
         .filter(|e| f.user.as_ref().is_none_or(|u| *u == e.by))
         .filter(|e| f.from.is_none_or(|d| e.at.date_naive() >= d))
         .filter(|e| f.to.is_none_or(|d| e.at.date_naive() <= d))
-        .filter(|e| f.section.as_ref().is_none_or(|s| e.refs.get("section_id") == Some(s)))
-        .filter(|e| f.staff.as_ref().is_none_or(|s| e.refs.get("staff_id") == Some(s)))
-        .filter(|e| f.action_prefix.as_ref().is_none_or(|p| e.action.starts_with(p.as_str())))
+        .filter(|e| {
+            f.section
+                .as_ref()
+                .is_none_or(|s| e.refs.get("section_id") == Some(s))
+        })
+        .filter(|e| {
+            f.staff
+                .as_ref()
+                .is_none_or(|s| e.refs.get("staff_id") == Some(s))
+        })
+        .filter(|e| {
+            f.action_prefix
+                .as_ref()
+                .is_none_or(|p| e.action.starts_with(p.as_str()))
+        })
         .filter(|e| text.is_empty() || contains_ci(&e.detail, &text))
         .collect();
     out.sort_by_key(|a| std::cmp::Reverse(a.at));
@@ -415,7 +510,10 @@ mod tests {
     }
 
     fn ts(y: i32, m: u32, d: u32, h: u32) -> Ts {
-        chrono::FixedOffset::east_opt(8 * 3600).unwrap().with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
+        chrono::FixedOffset::east_opt(8 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(y, m, d, h, 0, 0)
+            .unwrap()
     }
 
     const TODAY: (i32, u32, u32) = (2026, 11, 14);
@@ -433,7 +531,15 @@ mod tests {
             status: StaffStatus::Active,
             assignments: tests
                 .iter()
-                .map(|t| ((*t).to_string(), Assignment { state: AssignState::Assigned, since: ymd(2025, 1, 1) }))
+                .map(|t| {
+                    (
+                        (*t).to_string(),
+                        Assignment {
+                            state: AssignState::Assigned,
+                            since: ymd(2025, 1, 1),
+                        },
+                    )
+                })
                 .collect(),
         }
     }
@@ -455,7 +561,13 @@ mod tests {
     }
 
     fn test_sys(id: &str, name: &str, order: u32) -> TestSystem {
-        TestSystem { id: id.into(), name: name.into(), order, retired: false, rule_id: None }
+        TestSystem {
+            id: id.into(),
+            name: name.into(),
+            order,
+            retired: false,
+            rule_id: None,
+        }
     }
 
     fn delay(id: &str, staff_id: &str, test_id: &str, stage: u32, at: Ts) -> DelayNote {
@@ -475,7 +587,10 @@ mod tests {
     fn base() -> Data {
         let mut d = Data::new_empty("jtan", ts(2026, 11, 14, 9));
         d.sections[0].id = "s-chem".into();
-        d.sections[0].tests = vec![test_sys("t-ca", "Cobas", 0), test_sys("t-cb", "Architect", 1)];
+        d.sections[0].tests = vec![
+            test_sys("t-ca", "Cobas", 0),
+            test_sys("t-cb", "Architect", 1),
+        ];
         d.sections[1].id = "s-haem".into();
         d.sections[1].tests = vec![test_sys("t-h", "Cell-DYN Ruby", 0)];
         d
@@ -489,7 +604,8 @@ mod tests {
     #[test]
     fn excludes_hidden_removed_retired_and_na() {
         let mut d = base();
-        d.staff.push(staff("p-1", "Alice", "MLT", &["t-ca", "t-cb", "t-h"]));
+        d.staff
+            .push(staff("p-1", "Alice", "MLT", &["t-ca", "t-cb", "t-h"]));
         let mut hidden = staff("p-2", "Bob", "MLT", &["t-ca"]);
         hidden.status = StaffStatus::Hidden;
         let mut removed = staff("p-3", "Cara", "MLT", &["t-ca"]);
@@ -500,7 +616,10 @@ mod tests {
         d.sections[1].tests[0].retired = true;
         let items = items_for(&d);
         assert_eq!(items.len(), 1);
-        assert_eq!((items[0].staff_id.as_str(), items[0].test_id.as_str()), ("p-1", "t-ca"));
+        assert_eq!(
+            (items[0].staff_id.as_str(), items[0].test_id.as_str()),
+            ("p-1", "t-ca")
+        );
         assert_eq!(items[0].section_name, "Chemistry");
         assert_eq!(items[0].test_name, "Cobas");
         assert_eq!(items[0].title, "MLT");
@@ -513,13 +632,21 @@ mod tests {
     /// Abe/Architect overdue earlier than Alice.
     fn urgency_data() -> Data {
         let mut d = base();
-        for (id, name) in [("p-a", "Alice"), ("p-b", "Bob"), ("p-c", "Cara"), ("p-d", "Dan"), ("p-e", "Abe")] {
+        for (id, name) in [
+            ("p-a", "Alice"),
+            ("p-b", "Bob"),
+            ("p-c", "Cara"),
+            ("p-d", "Dan"),
+            ("p-e", "Abe"),
+        ] {
             d.staff.push(staff(id, name, "MLT", &["t-ca", "t-cb"]));
         }
         // Semi-annual due = completed + 6 months after Initial.
         d.records.push(rec("r1", "p-a", "t-ca", 0, ymd(2026, 4, 1))); // due 2026-10-01 overdue
-        d.records.push(rec("r2", "p-b", "t-ca", 0, ymd(2026, 5, 20))); // due 2026-11-20 soon
-        d.records.push(rec("r3", "p-c", "t-ca", 0, ymd(2026, 10, 1))); // due 2027-04-01 on track
+        d.records
+            .push(rec("r2", "p-b", "t-ca", 0, ymd(2026, 5, 20))); // due 2026-11-20 soon
+        d.records
+            .push(rec("r3", "p-c", "t-ca", 0, ymd(2026, 10, 1))); // due 2027-04-01 on track
         d.records.push(rec("r4", "p-e", "t-cb", 0, ymd(2026, 3, 1))); // due 2026-09-01 overdue
         d
     }
@@ -528,7 +655,10 @@ mod tests {
     fn sorted_by_urgency() {
         let d = urgency_data();
         let items = items_for(&d);
-        let order: Vec<(&str, &str)> = items.iter().map(|i| (i.staff_name.as_str(), i.test_name.as_str())).collect();
+        let order: Vec<(&str, &str)> = items
+            .iter()
+            .map(|i| (i.staff_name.as_str(), i.test_name.as_str()))
+            .collect();
         // Overdue by due date (Abe/Architect 09-01, Alice/Cobas 10-01), then DueSoon, OnTrack,
         // then NotStarted (no due) ordered by staff name.
         assert_eq!(items[0].status, DueStatus::Overdue);
@@ -550,13 +680,22 @@ mod tests {
     #[test]
     fn delay_note_is_latest_for_next_stage_only() {
         let mut d = urgency_data();
-        d.delay_notes.push(delay("n1", "p-a", "t-ca", 1, ts(2026, 10, 5, 9)));
-        d.delay_notes.push(delay("n2", "p-a", "t-ca", 1, ts(2026, 10, 9, 9)));
-        d.delay_notes.push(delay("n3", "p-a", "t-ca", 0, ts(2026, 10, 12, 9)));
+        d.delay_notes
+            .push(delay("n1", "p-a", "t-ca", 1, ts(2026, 10, 5, 9)));
+        d.delay_notes
+            .push(delay("n2", "p-a", "t-ca", 1, ts(2026, 10, 9, 9)));
+        d.delay_notes
+            .push(delay("n3", "p-a", "t-ca", 0, ts(2026, 10, 12, 9)));
         let items = items_for(&d);
-        let alice = items.iter().find(|i| i.staff_id == "p-a" && i.test_id == "t-ca").unwrap();
+        let alice = items
+            .iter()
+            .find(|i| i.staff_id == "p-a" && i.test_id == "t-ca")
+            .unwrap();
         assert_eq!(alice.delay_note.as_ref().unwrap().id, "n2");
-        let bob = items.iter().find(|i| i.staff_id == "p-b" && i.test_id == "t-ca").unwrap();
+        let bob = items
+            .iter()
+            .find(|i| i.staff_id == "p-b" && i.test_id == "t-ca")
+            .unwrap();
         assert!(bob.delay_note.is_none());
     }
 
@@ -589,64 +728,113 @@ mod tests {
     #[test]
     fn counts_and_delayed() {
         let mut d = urgency_data();
-        d.delay_notes.push(delay("n1", "p-a", "t-ca", 1, ts(2026, 10, 5, 9))); // overdue + note
-        d.delay_notes.push(delay("n2", "p-b", "t-ca", 1, ts(2026, 10, 5, 9))); // soon + note
-        d.delay_notes.push(delay("n3", "p-c", "t-ca", 1, ts(2026, 10, 5, 9))); // on track: not counted
+        d.delay_notes
+            .push(delay("n1", "p-a", "t-ca", 1, ts(2026, 10, 5, 9))); // overdue + note
+        d.delay_notes
+            .push(delay("n2", "p-b", "t-ca", 1, ts(2026, 10, 5, 9))); // soon + note
+        d.delay_notes
+            .push(delay("n3", "p-c", "t-ca", 1, ts(2026, 10, 5, 9))); // on track: not counted
         let items = items_for(&d);
         let c = counts(&items);
-        assert_eq!(c, Counts { overdue: 2, due_soon: 1, on_track: 1, delayed: 2 });
+        assert_eq!(
+            c,
+            Counts {
+                overdue: 2,
+                due_soon: 1,
+                on_track: 1,
+                delayed: 2
+            }
+        );
     }
 
     #[test]
     fn filter_by_section_status_text() {
         let mut d = urgency_data();
-        d.staff[0].assignments.insert("t-h".into(), Assignment { state: AssignState::Assigned, since: ymd(2025, 1, 1) });
+        d.staff[0].assignments.insert(
+            "t-h".into(),
+            Assignment {
+                state: AssignState::Assigned,
+                since: ymd(2025, 1, 1),
+            },
+        );
         d.staff[0].title = "Senior MLT".into();
-        d.delay_notes.push(delay("n1", "p-a", "t-ca", 1, ts(2026, 10, 5, 9)));
+        d.delay_notes
+            .push(delay("n1", "p-a", "t-ca", 1, ts(2026, 10, 5, 9)));
         let items = items_for(&d);
 
         let all = filter_items(&items, &DueFilter::default());
         assert_eq!(all.len(), items.len());
 
-        let f = DueFilter { section: Some("s-haem".into()), ..Default::default() };
+        let f = DueFilter {
+            section: Some("s-haem".into()),
+            ..Default::default()
+        };
         let r = filter_items(&items, &f);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].test_id, "t-h");
 
-        let f = DueFilter { test: Some("t-cb".into()), ..Default::default() };
+        let f = DueFilter {
+            test: Some("t-cb".into()),
+            ..Default::default()
+        };
         let r = filter_items(&items, &f);
         assert_eq!(r.len(), 5);
         assert!(r.iter().all(|i| i.test_id == "t-cb"));
 
-        let f = DueFilter { status: StatusFilter::Overdue, ..Default::default() };
+        let f = DueFilter {
+            status: StatusFilter::Overdue,
+            ..Default::default()
+        };
         assert_eq!(filter_items(&items, &f).len(), 2);
 
-        let f = DueFilter { status: StatusFilter::Delayed, ..Default::default() };
+        let f = DueFilter {
+            status: StatusFilter::Delayed,
+            ..Default::default()
+        };
         let r = filter_items(&items, &f);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].staff_id, "p-a");
 
-        let f = DueFilter { status: StatusFilter::NotStarted, section: Some("s-haem".into()), ..Default::default() };
+        let f = DueFilter {
+            status: StatusFilter::NotStarted,
+            section: Some("s-haem".into()),
+            ..Default::default()
+        };
         assert_eq!(filter_items(&items, &f).len(), 1);
 
-        let f = DueFilter { title: Some("senior mlt".into()), ..Default::default() };
+        let f = DueFilter {
+            title: Some("senior mlt".into()),
+            ..Default::default()
+        };
         let r = filter_items(&items, &f);
         assert_eq!(r.len(), 3);
         assert!(r.iter().all(|i| i.staff_id == "p-a"));
 
-        let f = DueFilter { text: "ARCH".into(), ..Default::default() };
+        let f = DueFilter {
+            text: "ARCH".into(),
+            ..Default::default()
+        };
         let r = filter_items(&items, &f);
         assert_eq!(r.len(), 5);
         assert!(r.iter().all(|i| i.test_name == "Architect"));
-        let f = DueFilter { text: "chem".into(), ..Default::default() };
+        let f = DueFilter {
+            text: "chem".into(),
+            ..Default::default()
+        };
         let r = filter_items(&items, &f);
         assert_eq!(r.len(), 10);
         assert!(r.iter().all(|i| i.section_name == "Chemistry"));
-        let f = DueFilter { text: "bob".into(), ..Default::default() };
+        let f = DueFilter {
+            text: "bob".into(),
+            ..Default::default()
+        };
         let r = filter_items(&items, &f);
         assert_eq!(r.len(), 2);
         assert!(r.iter().all(|i| i.staff_name == "Bob"));
-        let f = DueFilter { text: "zzz".into(), ..Default::default() };
+        let f = DueFilter {
+            text: "zzz".into(),
+            ..Default::default()
+        };
         assert!(filter_items(&items, &f).is_empty());
     }
 
@@ -675,9 +863,16 @@ mod tests {
         let mut d = base();
         d.staff.push(staff("p-1", "Alice", "MLT", &["t-ca"]));
         for i in 0..6u32 {
-            d.records.push(rec(&format!("r{i}"), "p-1", "t-ca", i, ymd(2024, 1 + i, 10)));
+            d.records.push(rec(
+                &format!("r{i}"),
+                "p-1",
+                "t-ca",
+                i,
+                ymd(2024, 1 + i, 10),
+            ));
         }
-        d.records.push(rec("other", "p-1", "t-cb", 0, ymd(2026, 1, 1)));
+        d.records
+            .push(rec("other", "p-1", "t-cb", 0, ymd(2026, 1, 1)));
         let h = history(&d, "p-1", "t-ca");
         assert_eq!(h.len(), 6);
         assert!(h.windows(2).all(|w| w[0].date() >= w[1].date()));
@@ -698,7 +893,8 @@ mod tests {
         let mut d = base();
         d.staff.push(staff("p-1", "Alice", "MLT", &["t-ca"]));
         d.records.push(rec("r1", "p-1", "t-ca", 0, ymd(2026, 5, 1)));
-        d.delay_notes.push(delay("d1", "p-1", "t-ca", 1, ts(2026, 5, 1, 10)));
+        d.delay_notes
+            .push(delay("d1", "p-1", "t-ca", 1, ts(2026, 5, 1, 10)));
         d.notes.push(Note {
             id: "n1".into(),
             staff_id: "p-1".into(),
@@ -717,7 +913,8 @@ mod tests {
             by: "jtan".into(),
             at: ts(2026, 5, 1, 11),
         });
-        d.delay_notes.push(delay("d2", "p-1", "t-ca", 1, ts(2026, 6, 1, 10)));
+        d.delay_notes
+            .push(delay("d2", "p-1", "t-ca", 1, ts(2026, 6, 1, 10)));
         let h = history(&d, "p-1", "t-ca");
         assert_eq!(h.len(), 4);
         assert!(matches!(h[0], HistoryEntry::Delay(n) if n.id == "d2"));
@@ -735,11 +932,20 @@ mod tests {
         d.staff.push(gone);
         let r = search(&d, "cel dyn", 10);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].0, SearchHit::Test { section_id: "s-haem".into(), test_id: "t-h".into() });
+        assert_eq!(
+            r[0].0,
+            SearchHit::Test {
+                section_id: "s-haem".into(),
+                test_id: "t-h".into()
+            }
+        );
         assert_eq!(r[0].1, "Cell-DYN Ruby \u{b7} Haematology");
 
         let r = search(&d, "alic", 10);
-        assert_eq!(r, vec![(SearchHit::Staff("p-1".into()), "Alice Tan".to_string())]);
+        assert_eq!(
+            r,
+            vec![(SearchHit::Staff("p-1".into()), "Alice Tan".to_string())]
+        );
 
         let r = search(&d, "chem", 10);
         assert!(r.contains(&(SearchHit::Section("s-chem".into()), "Chemistry".to_string())));
@@ -747,7 +953,10 @@ mod tests {
         let r = search(&d, "CEL DYN", 10);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].1, "Cell-DYN Ruby \u{b7} Haematology");
-        assert_eq!(search(&d, "Alic", 10), vec![(SearchHit::Staff("p-1".into()), "Alice Tan".to_string())]);
+        assert_eq!(
+            search(&d, "Alic", 10),
+            vec![(SearchHit::Staff("p-1".into()), "Alice Tan".to_string())]
+        );
 
         assert!(search(&d, "", 10).is_empty());
         assert!(search(&d, "   ", 10).is_empty());
@@ -767,14 +976,49 @@ mod tests {
         let mut hid = staff("p-3", "Hal", "MLT", &["t-ca"]);
         hid.status = StaffStatus::Hidden;
         d.staff.push(hid);
-        d.staff[1].assignments.insert("t-h".into(), Assignment { state: AssignState::Na, since: ymd(2025, 1, 1) });
+        d.staff[1].assignments.insert(
+            "t-h".into(),
+            Assignment {
+                state: AssignState::Na,
+                since: ymd(2025, 1, 1),
+            },
+        );
 
-        let names = |f: &StaffFilter| filter_staff(&d, f).iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        let names = |f: &StaffFilter| {
+            filter_staff(&d, f)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(names(&StaffFilter::default()), ["Amy", "Zed"]);
-        assert_eq!(names(&StaffFilter { status: Some(StaffStatus::Hidden), ..Default::default() }), ["Hal"]);
-        assert_eq!(names(&StaffFilter { section: Some("s-haem".into()), ..Default::default() }), ["Zed"]);
-        assert_eq!(names(&StaffFilter { title: Some("senior mlt".into()), ..Default::default() }), ["Amy"]);
-        assert_eq!(names(&StaffFilter { text: "ZE".into(), ..Default::default() }), ["Zed"]);
+        assert_eq!(
+            names(&StaffFilter {
+                status: Some(StaffStatus::Hidden),
+                ..Default::default()
+            }),
+            ["Hal"]
+        );
+        assert_eq!(
+            names(&StaffFilter {
+                section: Some("s-haem".into()),
+                ..Default::default()
+            }),
+            ["Zed"]
+        );
+        assert_eq!(
+            names(&StaffFilter {
+                title: Some("senior mlt".into()),
+                ..Default::default()
+            }),
+            ["Amy"]
+        );
+        assert_eq!(
+            names(&StaffFilter {
+                text: "ZE".into(),
+                ..Default::default()
+            }),
+            ["Zed"]
+        );
         assert_eq!(distinct_titles(&d), ["MLT", "Senior MLT"]);
     }
 
@@ -784,29 +1028,96 @@ mod tests {
             by: by.into(),
             action: action.into(),
             detail: detail.into(),
-            refs: refs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect::<BTreeMap<_, _>>(),
+            refs: refs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect::<BTreeMap<_, _>>(),
         }
     }
 
     #[test]
     fn audit_filter_by_user_and_range() {
         let mut d = base();
-        d.audit.push(audit(ts(2026, 11, 1, 9), "jtan", "completion.add", "Added Cobas", &[("staff_id", "p-1"), ("section_id", "s-chem")]));
-        d.audit.push(audit(ts(2026, 11, 10, 23), "mlee", "staff.add", "Added Bob", &[("staff_id", "p-2")]));
-        d.audit.push(audit(ts(2026, 11, 12, 9), "jtan", "completion.edit", "Edited", &[("staff_id", "p-1")]));
-        let ids = |f: &AuditFilter| filter_audit(&d, f).iter().map(|e| e.detail.clone()).collect::<Vec<_>>();
+        d.audit.push(audit(
+            ts(2026, 11, 1, 9),
+            "jtan",
+            "completion.add",
+            "Added Cobas",
+            &[("staff_id", "p-1"), ("section_id", "s-chem")],
+        ));
+        d.audit.push(audit(
+            ts(2026, 11, 10, 23),
+            "mlee",
+            "staff.add",
+            "Added Bob",
+            &[("staff_id", "p-2")],
+        ));
+        d.audit.push(audit(
+            ts(2026, 11, 12, 9),
+            "jtan",
+            "completion.edit",
+            "Edited",
+            &[("staff_id", "p-1")],
+        ));
+        let ids = |f: &AuditFilter| {
+            filter_audit(&d, f)
+                .iter()
+                .map(|e| e.detail.clone())
+                .collect::<Vec<_>>()
+        };
 
-        assert_eq!(ids(&AuditFilter::default()), ["Edited", "Added Bob", "Added Cobas"]);
-        assert_eq!(ids(&AuditFilter { user: Some("jtan".into()), ..Default::default() }), ["Edited", "Added Cobas"]);
+        assert_eq!(
+            ids(&AuditFilter::default()),
+            ["Edited", "Added Bob", "Added Cobas"]
+        );
+        assert_eq!(
+            ids(&AuditFilter {
+                user: Some("jtan".into()),
+                ..Default::default()
+            }),
+            ["Edited", "Added Cobas"]
+        );
         // `to` is inclusive of the whole day
-        let f = AuditFilter { from: Some(ymd(2026, 11, 2)), to: Some(ymd(2026, 11, 10)), ..Default::default() };
+        let f = AuditFilter {
+            from: Some(ymd(2026, 11, 2)),
+            to: Some(ymd(2026, 11, 10)),
+            ..Default::default()
+        };
         assert_eq!(ids(&f), ["Added Bob"]);
-        let f = AuditFilter { from: Some(ymd(2026, 11, 1)), to: Some(ymd(2026, 11, 1)), ..Default::default() };
+        let f = AuditFilter {
+            from: Some(ymd(2026, 11, 1)),
+            to: Some(ymd(2026, 11, 1)),
+            ..Default::default()
+        };
         assert_eq!(ids(&f), ["Added Cobas"]);
-        assert_eq!(ids(&AuditFilter { section: Some("s-chem".into()), ..Default::default() }), ["Added Cobas"]);
-        assert_eq!(ids(&AuditFilter { staff: Some("p-1".into()), ..Default::default() }), ["Edited", "Added Cobas"]);
-        assert_eq!(ids(&AuditFilter { action_prefix: Some("completion.".into()), ..Default::default() }), ["Edited", "Added Cobas"]);
-        assert_eq!(ids(&AuditFilter { text: "BOB".into(), ..Default::default() }), ["Added Bob"]);
+        assert_eq!(
+            ids(&AuditFilter {
+                section: Some("s-chem".into()),
+                ..Default::default()
+            }),
+            ["Added Cobas"]
+        );
+        assert_eq!(
+            ids(&AuditFilter {
+                staff: Some("p-1".into()),
+                ..Default::default()
+            }),
+            ["Edited", "Added Cobas"]
+        );
+        assert_eq!(
+            ids(&AuditFilter {
+                action_prefix: Some("completion.".into()),
+                ..Default::default()
+            }),
+            ["Edited", "Added Cobas"]
+        );
+        assert_eq!(
+            ids(&AuditFilter {
+                text: "BOB".into(),
+                ..Default::default()
+            }),
+            ["Added Bob"]
+        );
         assert_eq!(distinct_audit_users(&d), ["jtan", "mlee"]);
     }
 }

@@ -22,7 +22,10 @@ impl Toast {
     }
 
     pub fn lasting(text: impl Into<String>, d: Duration) -> Toast {
-        Toast { text: text.into(), until: Instant::now() + d }
+        Toast {
+            text: text.into(),
+            until: Instant::now() + d,
+        }
     }
 }
 
@@ -31,14 +34,24 @@ impl Toast {
 pub enum PendingAction {}
 
 pub enum Modal {
-    Confirm { title: String, body: String, action: PendingAction },
+    Confirm {
+        title: String,
+        body: String,
+        action: PendingAction,
+    },
     InactivityCountdown,
     /// Saving on close failed: offer Retry or Quit anyway.
-    ExitFailed { error: String },
+    ExitFailed {
+        error: String,
+    },
     /// "Quit anyway" ran; `rescued` is the rescue copy, if one was written.
-    ExitRescued { rescued: Option<PathBuf> },
+    ExitRescued {
+        rescued: Option<PathBuf>,
+    },
     /// Closing found another user holding the lock; the edits went to `path`.
-    ExitConflict { path: PathBuf },
+    ExitConflict {
+        path: PathBuf,
+    },
 }
 
 /// What the user chose in the modal this frame.
@@ -70,20 +83,34 @@ pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) -> bool {
     let (tone, text) = if let Some(e) = s.load_error() {
         (Tone::Error, format!("Can't read the data folder: {e}"))
     } else if s.read_only_reason().is_some() {
-        (Tone::Warn, "Read-only: data saved by a newer version".to_owned())
+        (
+            Tone::Warn,
+            "Read-only: data saved by a newer version".to_owned(),
+        )
     } else if let Some(e) = s.save_error() {
         hover = Some(e.to_owned());
         (Tone::Error, "Not saved \u{2014} retrying".to_owned())
     } else if !s.corrupt_files().is_empty() {
-        let names: Vec<String> =
-            s.corrupt_files().iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
-        (Tone::Warn, format!("Skipped unreadable snapshot files: {}", names.join(", ")))
+        let names: Vec<String> = s
+            .corrupt_files()
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        (
+            Tone::Warn,
+            format!("Skipped unreadable snapshot files: {}", names.join(", ")),
+        )
     } else {
         match s.mode() {
             Mode::Editing => return false,
             Mode::Viewing { holder: Some(h) } => (
                 Tone::Info,
-                format!("Viewing \u{2014} {} is editing (since {})", h.user, h.acquired_at.format("%H:%M")),
+                format!(
+                    "Viewing \u{2014} {} is editing (since {})",
+                    h.user,
+                    h.acquired_at.format("%H:%M")
+                ),
             ),
             Mode::Viewing { holder: None } => {
                 start_button = true;
@@ -101,16 +128,22 @@ pub(crate) fn banner(ui: &mut egui::Ui, pal: &Palette, s: &Session) -> bool {
         Tone::Info => icon::EYE,
     };
     let mut start = false;
-    Panel::top("banner").frame(Frame::new().fill(fill).inner_margin(Margin::symmetric(20, 8))).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(glyph).color(fg));
-            let resp = ui.label(RichText::new(text).color(fg));
-            if let Some(h) = hover {
-                resp.on_hover_text(h);
-            }
-            start = start_button && ui.button("Start editing").clicked();
+    Panel::top("banner")
+        .frame(
+            Frame::new()
+                .fill(fill)
+                .inner_margin(Margin::symmetric(20, 8)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(glyph).color(fg));
+                let resp = ui.label(RichText::new(text).color(fg));
+                if let Some(h) = hover {
+                    resp.on_hover_text(h);
+                }
+                start = start_button && ui.button("Start editing").clicked();
+            });
         });
-    });
     start
 }
 
@@ -124,61 +157,73 @@ pub(crate) fn show_modal(
 ) -> Option<ModalChoice> {
     let mut choice = None;
     let frame = Frame::window(&ctx.global_style()).inner_margin(Margin::same(24));
-    let resp = egui::Modal::new(egui::Id::new("app_modal")).frame(frame).show(ctx, |ui| {
-        ui.set_max_width(440.0);
-        let title = |ui: &mut egui::Ui, t: &str| ui.label(RichText::new(t).family(serif()).size(20.0));
-        match modal {
-            Modal::Confirm { title: t, body, .. } => {
-                title(ui, t);
-                ui.label(body.as_str());
-                ui.horizontal(|ui| {
-                    if ui.button("Confirm").clicked() {
-                        choice = Some(ModalChoice::Confirm);
+    let resp = egui::Modal::new(egui::Id::new("app_modal"))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            let title =
+                |ui: &mut egui::Ui, t: &str| ui.label(RichText::new(t).family(serif()).size(20.0));
+            match modal {
+                Modal::Confirm { title: t, body, .. } => {
+                    title(ui, t);
+                    ui.label(body.as_str());
+                    ui.horizontal(|ui| {
+                        if ui.button("Confirm").clicked() {
+                            choice = Some(ModalChoice::Confirm);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            choice = Some(ModalChoice::Close);
+                        }
+                    });
+                }
+                Modal::InactivityCountdown => {
+                    let left =
+                        warn_deadline.map_or(0, |d| d.saturating_duration_since(inst).as_secs());
+                    title(ui, "Still there?");
+                    ui.label(format!(
+                        "Editing stops in {left} s because there has been no activity."
+                    ));
+                    if ui.button("Stay").clicked() {
+                        choice = Some(ModalChoice::Stay);
                     }
-                    if ui.button("Cancel").clicked() {
-                        choice = Some(ModalChoice::Close);
+                }
+                Modal::ExitFailed { error } => {
+                    title(ui, "Couldn't save your changes");
+                    ui.label(format!("Couldn't save your changes: {error}"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Retry").clicked() {
+                            choice = Some(ModalChoice::RetryExit);
+                        }
+                        if ui.button("Quit anyway").clicked() {
+                            choice = Some(ModalChoice::QuitAnyway);
+                        }
+                    });
+                }
+                Modal::ExitRescued { rescued } => {
+                    title(ui, "Quitting without saving");
+                    match rescued {
+                        Some(p) => ui.label(format!(
+                            "Your unsaved changes were copied to {}",
+                            p.display()
+                        )),
+                        None => ui.label("Your unsaved changes could not be rescued."),
+                    };
+                    if ui.button("Close").clicked() {
+                        choice = Some(ModalChoice::Quit);
                     }
-                });
-            }
-            Modal::InactivityCountdown => {
-                let left = warn_deadline.map_or(0, |d| d.saturating_duration_since(inst).as_secs());
-                title(ui, "Still there?");
-                ui.label(format!("Editing stops in {left} s because there has been no activity."));
-                if ui.button("Stay").clicked() {
-                    choice = Some(ModalChoice::Stay);
+                }
+                Modal::ExitConflict { path } => {
+                    title(ui, "Someone else is editing");
+                    ui.label(format!(
+                        "Someone else took over editing. Your changes were saved to {}",
+                        path.display()
+                    ));
+                    if ui.button("Close").clicked() {
+                        choice = Some(ModalChoice::Quit);
+                    }
                 }
             }
-            Modal::ExitFailed { error } => {
-                title(ui, "Couldn't save your changes");
-                ui.label(format!("Couldn't save your changes: {error}"));
-                ui.horizontal(|ui| {
-                    if ui.button("Retry").clicked() {
-                        choice = Some(ModalChoice::RetryExit);
-                    }
-                    if ui.button("Quit anyway").clicked() {
-                        choice = Some(ModalChoice::QuitAnyway);
-                    }
-                });
-            }
-            Modal::ExitRescued { rescued } => {
-                title(ui, "Quitting without saving");
-                match rescued {
-                    Some(p) => ui.label(format!("Your unsaved changes were copied to {}", p.display())),
-                    None => ui.label("Your unsaved changes could not be rescued."),
-                };
-                if ui.button("Close").clicked() {
-                    choice = Some(ModalChoice::Quit);
-                }
-            }
-            Modal::ExitConflict { path } => {
-                title(ui, "Someone else is editing");
-                ui.label(format!("Someone else took over editing. Your changes were saved to {}", path.display()));
-                if ui.button("Close").clicked() {
-                    choice = Some(ModalChoice::Quit);
-                }
-            }
-        }
-    });
+        });
     if choice.is_none() && resp.should_close() {
         choice = match modal {
             Modal::Confirm { .. } => Some(ModalChoice::Close),

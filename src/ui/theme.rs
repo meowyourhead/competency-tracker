@@ -1,7 +1,9 @@
-﻿//! Palette, fonts and egui style: a warm, calm look (cream background,
+//! Palette, fonts and egui style: a warm, calm look (cream background,
 //! sidebar, serif headings, terracotta accent, rounded cards and pills).
 
-use egui::{Color32, CornerRadius, FontDefinitions, FontFamily, Margin, RichText, Shadow, Stroke, Visuals};
+use egui::{
+    Color32, CornerRadius, FontDefinitions, FontFamily, Margin, RichText, Shadow, Stroke, Visuals,
+};
 
 use crate::prefs::Theme;
 
@@ -91,24 +93,52 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// glyphs the embedded fonts lack. Monospace is left alone.
 fn add_text_fonts(fonts: &mut FontDefinitions) {
     let faces: [(&str, &[u8]); 4] = [
-        ("Inter-Regular", include_bytes!("../../assets/fonts/Inter-Regular.ttf")),
-        ("Inter-Medium", include_bytes!("../../assets/fonts/Inter-Medium.ttf")),
-        ("SourceSerif4-Regular", include_bytes!("../../assets/fonts/SourceSerif4-Regular.ttf")),
-        ("SourceSerif4-Semibold", include_bytes!("../../assets/fonts/SourceSerif4-Semibold.ttf")),
+        (
+            "Inter-Regular",
+            include_bytes!("../../assets/fonts/Inter-Regular.ttf"),
+        ),
+        (
+            "Inter-Medium",
+            include_bytes!("../../assets/fonts/Inter-Medium.ttf"),
+        ),
+        (
+            "SourceSerif4-Regular",
+            include_bytes!("../../assets/fonts/SourceSerif4-Regular.ttf"),
+        ),
+        (
+            "SourceSerif4-Semibold",
+            include_bytes!("../../assets/fonts/SourceSerif4-Semibold.ttf"),
+        ),
     ];
     for (name, bytes) in faces {
-        fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_static(bytes)));
+        fonts.font_data.insert(
+            name.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(bytes)),
+        );
     }
-    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let fallback = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
     let with_fallback = |first: &str| {
         let mut list = vec![first.to_owned()];
         list.extend(fallback.iter().cloned());
         list
     };
-    fonts.families.insert(FontFamily::Proportional, with_fallback("Inter-Regular"));
-    fonts.families.insert(medium(), with_fallback("Inter-Medium"));
-    fonts.families.insert(serif(), with_fallback("SourceSerif4-Semibold"));
-    fonts.families.insert(FontFamily::Name("serif-regular".into()), with_fallback("SourceSerif4-Regular"));
+    fonts
+        .families
+        .insert(FontFamily::Proportional, with_fallback("Inter-Regular"));
+    fonts
+        .families
+        .insert(medium(), with_fallback("Inter-Medium"));
+    fonts
+        .families
+        .insert(serif(), with_fallback("SourceSerif4-Semibold"));
+    fonts.families.insert(
+        FontFamily::Name("serif-regular".into()),
+        with_fallback("SourceSerif4-Regular"),
+    );
 }
 /// Applies the palette and shapes for `t` and makes it the active theme.
 pub fn apply(ctx: &egui::Context, t: Theme) {
@@ -126,8 +156,18 @@ pub fn apply(ctx: &egui::Context, t: Theme) {
     v.window_stroke = border;
     v.window_corner_radius = radius;
     v.menu_corner_radius = radius;
-    v.window_shadow = Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
-    v.popup_shadow = Shadow { offset: [0, 4], blur: 12, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
+    v.window_shadow = Shadow {
+        offset: [0, 6],
+        blur: 24,
+        spread: 0,
+        color: Color32::from_black_alpha(shadow_alpha),
+    };
+    v.popup_shadow = Shadow {
+        offset: [0, 4],
+        blur: 12,
+        spread: 0,
+        color: Color32::from_black_alpha(shadow_alpha),
+    };
     v.extreme_bg_color = pal.card;
     v.faint_bg_color = pal.sidebar;
     v.code_bg_color = pal.sidebar;
@@ -159,7 +199,13 @@ pub fn apply(ctx: &egui::Context, t: Theme) {
     w.open.weak_bg_fill = pal.card;
     w.open.bg_stroke = border;
     w.open.fg_stroke = Stroke::new(1.0, pal.text);
-    for wv in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+    for wv in [
+        &mut w.noninteractive,
+        &mut w.inactive,
+        &mut w.hovered,
+        &mut w.active,
+        &mut w.open,
+    ] {
         wv.corner_radius = radius;
         wv.expansion = 0.0;
     }

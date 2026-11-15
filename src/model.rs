@@ -56,9 +56,24 @@ impl Rule {
             id: "r-global".into(),
             name: "Global".into(),
             stages: vec![
-                Stage { label: "Initial".into(), interval_months: None, repeats: false, ordinal: false },
-                Stage { label: "Semi-annual".into(), interval_months: Some(6), repeats: false, ordinal: false },
-                Stage { label: "Annual".into(), interval_months: Some(12), repeats: true, ordinal: true },
+                Stage {
+                    label: "Initial".into(),
+                    interval_months: None,
+                    repeats: false,
+                    ordinal: false,
+                },
+                Stage {
+                    label: "Semi-annual".into(),
+                    interval_months: Some(6),
+                    repeats: false,
+                    ordinal: false,
+                },
+                Stage {
+                    label: "Annual".into(),
+                    interval_months: Some(12),
+                    repeats: true,
+                    ordinal: true,
+                },
             ],
         }
     }
@@ -218,17 +233,24 @@ pub struct Data {
 impl Data {
     pub fn new_empty(user: &str, now: Ts) -> Data {
         let rule = Rule::default_global();
-        let sections = ["Chemistry", "Haematology", "Urinalysis", "Molecular", "Microbiology", "Serology"]
-            .iter()
-            .enumerate()
-            .map(|(i, name)| Section {
-                id: new_id("s"),
-                name: (*name).into(),
-                order: i as u32,
-                retired: false,
-                tests: vec![],
-            })
-            .collect();
+        let sections = [
+            "Chemistry",
+            "Haematology",
+            "Urinalysis",
+            "Molecular",
+            "Microbiology",
+            "Serology",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| Section {
+            id: new_id("s"),
+            name: (*name).into(),
+            order: i as u32,
+            retired: false,
+            tests: vec![],
+        })
+        .collect();
         Data {
             schema_version: SCHEMA_VERSION,
             saved_at: now,
@@ -300,7 +322,10 @@ mod tests {
     use chrono::TimeZone;
 
     fn sample_ts() -> Ts {
-        chrono::FixedOffset::east_opt(8 * 3600).unwrap().with_ymd_and_hms(2026, 11, 14, 9, 30, 0).unwrap()
+        chrono::FixedOffset::east_opt(8 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 14, 9, 30, 0)
+            .unwrap()
     }
 
     #[test]
@@ -315,8 +340,18 @@ mod tests {
         let d = Data::new_empty("jtan", sample_ts());
         assert_eq!(d.default_rule_id, "r-global");
         assert_eq!(
-            d.sections_sorted().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            ["Chemistry", "Haematology", "Urinalysis", "Molecular", "Microbiology", "Serology"]
+            d.sections_sorted()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Chemistry",
+                "Haematology",
+                "Urinalysis",
+                "Molecular",
+                "Microbiology",
+                "Serology"
+            ]
         );
         assert_eq!(d.rules[0].stages[1].interval_months, Some(6));
         assert!(d.rules[0].stages[2].repeats && d.rules[0].stages[2].ordinal);
@@ -336,9 +371,25 @@ mod tests {
     #[test]
     fn lookups_and_rule_fallback() {
         let mut d = Data::new_empty("jtan", sample_ts());
-        d.rules.push(Rule { id: "r-x".into(), name: "X".into(), stages: vec![] });
-        d.sections[0].tests.push(TestSystem { id: "t-1".into(), name: "A".into(), order: 0, retired: false, rule_id: None });
-        d.sections[0].tests.push(TestSystem { id: "t-2".into(), name: "B".into(), order: 1, retired: false, rule_id: Some("r-x".into()) });
+        d.rules.push(Rule {
+            id: "r-x".into(),
+            name: "X".into(),
+            stages: vec![],
+        });
+        d.sections[0].tests.push(TestSystem {
+            id: "t-1".into(),
+            name: "A".into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        });
+        d.sections[0].tests.push(TestSystem {
+            id: "t-2".into(),
+            name: "B".into(),
+            order: 1,
+            retired: false,
+            rule_id: Some("r-x".into()),
+        });
         let (sec, t) = d.test("t-1").unwrap();
         assert_eq!((sec.name.as_str(), t.name.as_str()), ("Chemistry", "A"));
         assert_eq!(d.rule_for_test("t-1").id, "r-global");
@@ -359,7 +410,14 @@ mod tests {
     #[test]
     fn settings_defaults() {
         let s = Settings::default();
-        assert_eq!((s.due_soon_days, s.variance_tolerance_days, s.inactivity_minutes), (30, 30, 10));
+        assert_eq!(
+            (
+                s.due_soon_days,
+                s.variance_tolerance_days,
+                s.inactivity_minutes
+            ),
+            (30, 30, 10)
+        );
         assert_eq!((s.initial_due_days, s.archive_after_days), (None, None));
     }
 
@@ -382,7 +440,11 @@ mod tests {
         assert_eq!(d.rule_for_test("any").id, "r-global");
 
         let mut d = Data::new_empty("jtan", sample_ts());
-        d.rules.push(Rule { id: "r-x".into(), name: "X".into(), stages: vec![] });
+        d.rules.push(Rule {
+            id: "r-x".into(),
+            name: "X".into(),
+            stages: vec![],
+        });
         d.default_rule_id = "r-x".into();
         d.ensure_valid();
         assert_eq!(d.default_rule_id, "r-x");
@@ -396,8 +458,10 @@ mod tests {
 
     #[test]
     fn enums_serialize_lowercase() {
-        assert_eq!(serde_json::to_string(&StaffStatus::Hidden).unwrap(), "\"hidden\"");
+        assert_eq!(
+            serde_json::to_string(&StaffStatus::Hidden).unwrap(),
+            "\"hidden\""
+        );
         assert_eq!(serde_json::to_string(&AssignState::Na).unwrap(), "\"na\"");
     }
 }
-

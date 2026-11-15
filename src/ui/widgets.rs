@@ -2,8 +2,8 @@
 //! state, plus the icon button and nav row used by the shell.
 
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Popup, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2,
-    WidgetInfo, WidgetType,
+    Align2, Color32, CornerRadius, FontId, Popup, Rect, RichText, Sense, Stroke, StrokeKind,
+    TextEdit, Ui, Vec2, WidgetInfo, WidgetType,
 };
 use egui_phosphor::regular as icon;
 
@@ -34,7 +34,10 @@ pub fn status_colors(pal: &Palette, status: DueStatus) -> (Color32, Color32) {
 
 /// The text shown inside a due pill (without the delay marker).
 pub fn due_pill_text(info: &DueInfo) -> String {
-    let mut text = info.due_on.map(fmt_date).unwrap_or_else(|| "Initial pending".to_owned());
+    let mut text = info
+        .due_on
+        .map(fmt_date)
+        .unwrap_or_else(|| "Initial pending".to_owned());
     match info.source {
         DueSource::Excel => text.push_str(" \u{b7} from Excel"),
         DueSource::Manual => text.push_str(" \u{b7} manual"),
@@ -44,25 +47,44 @@ pub fn due_pill_text(info: &DueInfo) -> String {
 }
 
 /// A fully rounded, tinted pill with the due date (or "Initial pending").
-pub fn due_pill(ui: &mut Ui, pal: &Palette, info: &DueInfo, status: DueStatus, delayed: bool) -> egui::Response {
+pub fn due_pill(
+    ui: &mut Ui,
+    pal: &Palette,
+    info: &DueInfo,
+    status: DueStatus,
+    delayed: bool,
+) -> egui::Response {
     let mut text = due_pill_text(info);
     if delayed {
         text = format!("{} {text}", icon::PAUSE);
     }
     let (fill, fg) = status_colors(pal, status);
-    let galley = ui.painter().layout_no_wrap(text.clone(), FontId::proportional(12.5), fg);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.clone(), FontId::proportional(12.5), fg);
     let size = galley.size() + Vec2::new(20.0, 6.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, PILL, fill);
-        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, fg);
     }
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &text));
-    resp.on_hover_text(format!("Next: {} \u{b7} {}", info.next_stage_label, status_label(status)))
+    resp.on_hover_text(format!(
+        "Next: {} \u{b7} {}",
+        info.next_stage_label,
+        status_label(status)
+    ))
 }
 
 /// A clickable summary card: big serif number over a muted label.
-pub fn stat_card(ui: &mut Ui, pal: &Palette, label: &str, value: usize, selected: bool) -> egui::Response {
+pub fn stat_card(
+    ui: &mut Ui,
+    pal: &Palette,
+    label: &str,
+    value: usize,
+    selected: bool,
+) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(176.0, 84.0), Sense::click());
     if ui.is_rect_visible(rect) {
         let stroke = if selected {
@@ -73,17 +95,47 @@ pub fn stat_card(ui: &mut Ui, pal: &Palette, label: &str, value: usize, selected
             Stroke::new(1.0, pal.border)
         };
         let p = ui.painter();
-        p.rect(rect, CornerRadius::same(12), pal.card, stroke, StrokeKind::Inside);
+        p.rect(
+            rect,
+            CornerRadius::same(12),
+            pal.card,
+            stroke,
+            StrokeKind::Inside,
+        );
         let left = rect.left() + 16.0;
-        p.text(egui::pos2(left, rect.top() + 12.0), Align2::LEFT_TOP, value, FontId::new(30.0, serif()), pal.text);
-        p.text(egui::pos2(left, rect.bottom() - 12.0), Align2::LEFT_BOTTOM, label, FontId::proportional(13.0), pal.muted);
+        p.text(
+            egui::pos2(left, rect.top() + 12.0),
+            Align2::LEFT_TOP,
+            value,
+            FontId::new(30.0, serif()),
+            pal.text,
+        );
+        p.text(
+            egui::pos2(left, rect.bottom() - 12.0),
+            Align2::LEFT_BOTTOM,
+            label,
+            FontId::proportional(13.0),
+            pal.muted,
+        );
     }
-    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, format!("{label} {value}")));
+    resp.widget_info(|| {
+        WidgetInfo::selected(
+            WidgetType::Button,
+            true,
+            selected,
+            format!("{label} {value}"),
+        )
+    });
     resp
 }
 
 /// A pill-styled dropdown. `None` means "All". Returns true when changed.
-pub fn chip_select<T: PartialEq + Clone>(ui: &mut Ui, label: &str, current: &mut Option<T>, options: &[(T, String)]) -> bool {
+pub fn chip_select<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    label: &str,
+    current: &mut Option<T>,
+    options: &[(T, String)],
+) -> bool {
     let shown = current
         .as_ref()
         .and_then(|c| options.iter().find(|(v, _)| v == c))
@@ -112,9 +164,20 @@ pub fn chip_select<T: PartialEq + Clone>(ui: &mut Ui, label: &str, current: &mut
 /// egui_extras' date picker (which works on `jiff` dates) for a chrono date.
 pub fn date_picker(ui: &mut Ui, date: &mut chrono::NaiveDate, salt: &str) {
     use chrono::Datelike;
-    let Ok(mut d) = jiff::civil::Date::new(date.year() as i16, date.month() as i8, date.day() as i8) else { return };
-    ui.add(egui_extras::DatePickerButton::new(&mut d).id_salt(salt).format("%-d %b %Y").calendar_week(false));
-    if let Some(back) = chrono::NaiveDate::from_ymd_opt(d.year().into(), d.month() as u32, d.day() as u32) {
+    let Ok(mut d) =
+        jiff::civil::Date::new(date.year() as i16, date.month() as i8, date.day() as i8)
+    else {
+        return;
+    };
+    ui.add(
+        egui_extras::DatePickerButton::new(&mut d)
+            .id_salt(salt)
+            .format("%-d %b %Y")
+            .calendar_week(false),
+    );
+    if let Some(back) =
+        chrono::NaiveDate::from_ymd_opt(d.year().into(), d.month() as u32, d.day() as u32)
+    {
         *date = back;
     }
 }
@@ -145,9 +208,16 @@ pub fn icon_button(ui: &mut Ui, pal: &Palette, glyph: &str, label: &str) -> egui
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
-            ui.painter().rect_filled(rect, CornerRadius::same(8), pal.border);
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(8), pal.border);
         }
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(18.0), pal.text);
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(18.0),
+            pal.text,
+        );
     }
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
     resp.on_hover_text(label)
@@ -155,7 +225,14 @@ pub fn icon_button(ui: &mut Ui, pal: &Palette, glyph: &str, label: &str) -> egui
 
 /// A sidebar navigation row; the active row gets an accent-tinted background.
 /// When `compact`, only the icon is drawn (the label stays the accessible name).
-pub fn nav_item(ui: &mut Ui, pal: &Palette, glyph: &str, label: &str, active: bool, compact: bool) -> egui::Response {
+pub fn nav_item(
+    ui: &mut Ui,
+    pal: &Palette,
+    glyph: &str,
+    label: &str,
+    active: bool,
+    compact: bool,
+) -> egui::Response {
     let width = if compact { 36.0 } else { ui.available_width() };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -167,10 +244,22 @@ pub fn nav_item(ui: &mut Ui, pal: &Palette, glyph: &str, label: &str, active: bo
         }
         let color = if active { pal.accent } else { pal.text };
         let icon_rect = Rect::from_min_size(rect.min, Vec2::new(36.0, rect.height()));
-        p.text(icon_rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(18.0), color);
+        p.text(
+            icon_rect.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(18.0),
+            color,
+        );
         if !compact {
             let pos = egui::pos2(icon_rect.right() + 2.0, rect.center().y);
-            p.text(pos, Align2::LEFT_CENTER, label, FontId::proportional(14.5), pal.text);
+            p.text(
+                pos,
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(14.5),
+                pal.text,
+            );
         }
     }
     resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, active, label));

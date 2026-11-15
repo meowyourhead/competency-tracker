@@ -77,7 +77,16 @@ fn create_new(path: &Path, me: &LockInfo) -> io::Result<bool> {
 }
 
 fn safe_machine(me: &LockInfo) -> String {
-    me.machine.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
+    me.machine
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// "Now" for staleness checks: the file server's clock, read as the modified
@@ -89,7 +98,11 @@ pub fn server_now(lock_path: &Path, me: &LockInfo) -> SystemTime {
 }
 
 /// [`server_now`] with the fallback clock injectable (tests).
-fn server_now_with(lock_path: &Path, me: &LockInfo, local: impl FnOnce() -> SystemTime) -> SystemTime {
+fn server_now_with(
+    lock_path: &Path,
+    me: &LockInfo,
+    local: impl FnOnce() -> SystemTime,
+) -> SystemTime {
     let probe = lock_path.with_file_name(format!(".clock-probe.{}.{}", safe_machine(me), me.pid));
     // A leftover probe is removed first: rewriting the same bytes might not
     // move its modified time.
@@ -146,7 +159,12 @@ pub fn try_acquire(path: &Path, me: &LockInfo, now: Ts) -> io::Result<Acquire> {
 }
 
 /// [`try_acquire`] with the staleness clock injectable (tests).
-fn try_acquire_with(path: &Path, me: &LockInfo, now: Ts, clock: impl FnOnce() -> SystemTime) -> io::Result<Acquire> {
+fn try_acquire_with(
+    path: &Path,
+    me: &LockInfo,
+    now: Ts,
+    clock: impl FnOnce() -> SystemTime,
+) -> io::Result<Acquire> {
     if create_new(path, me)? {
         return Ok(Acquire::Acquired);
     }
@@ -202,7 +220,9 @@ fn takeover_with(
     let still_judged = match (read_lock(path), &judged) {
         (Ok(None), _) => true,
         (Ok(Some(cur)), Some(j)) => cur == *j,
-        (Err(e), None) if e.kind() == io::ErrorKind::InvalidData => corrupt_is_stale(path, reference)?,
+        (Err(e), None) if e.kind() == io::ErrorKind::InvalidData => {
+            corrupt_is_stale(path, reference)?
+        }
         (Err(e), _) if e.kind() != io::ErrorKind::InvalidData => return Err(e),
         _ => false,
     };
@@ -219,9 +239,9 @@ fn takeover_with(
     }
     // Read back to confirm we really own it.
     match read_lock(path) {
-        Ok(Some(cur)) if same_owner(&cur, me) => {
-            Ok(Acquire::TookOverStale(judged.unwrap_or_else(|| placeholder(now))))
-        }
+        Ok(Some(cur)) if same_owner(&cur, me) => Ok(Acquire::TookOverStale(
+            judged.unwrap_or_else(|| placeholder(now)),
+        )),
         Ok(Some(cur)) => Ok(Acquire::HeldBy(cur)),
         Ok(None) => Ok(Acquire::HeldBy(placeholder(now))),
         Err(e) if e.kind() == io::ErrorKind::InvalidData => Ok(Acquire::HeldBy(placeholder(now))),
@@ -230,7 +250,10 @@ fn takeover_with(
 }
 
 fn tmp_path(path: &Path, me: &LockInfo) -> std::path::PathBuf {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     path.with_file_name(format!("{name}.{}.{}.tmp", safe_machine(me), me.pid))
 }
 
@@ -286,7 +309,13 @@ mod tests {
     }
 
     fn info(pid: u32, hb: Ts) -> LockInfo {
-        LockInfo { user: "jtan".into(), machine: "PC1".into(), pid, acquired_at: hb, heartbeat_at: hb }
+        LockInfo {
+            user: "jtan".into(),
+            machine: "PC1".into(),
+            pid,
+            acquired_at: hb,
+            heartbeat_at: hb,
+        }
     }
 
     fn lock_path(d: &tempfile::TempDir) -> std::path::PathBuf {
@@ -318,7 +347,10 @@ mod tests {
         assert!(is_stale(&a, now));
         assert!(!is_stale_at(&p, &a, sys(now)).unwrap());
         let b = info(2, now);
-        assert_eq!(try_acquire_with(&p, &b, now, || sys(now)).unwrap(), Acquire::HeldBy(a));
+        assert_eq!(
+            try_acquire_with(&p, &b, now, || sys(now)).unwrap(),
+            Acquire::HeldBy(a)
+        );
     }
 
     #[test]
@@ -328,9 +360,17 @@ mod tests {
         let me = info(1, t0());
         let before = SystemTime::now() - std::time::Duration::from_secs(5);
         // This PC's clock is 5 minutes fast; the folder's is not.
-        let got = server_now_with(&p, &me, || SystemTime::now() + std::time::Duration::from_secs(300));
-        assert!(got >= before && got < SystemTime::now() + std::time::Duration::from_secs(60), "{got:?}");
-        assert!(!d.path().join(".clock-probe.PC1.1").exists(), "the probe file is removed");
+        let got = server_now_with(&p, &me, || {
+            SystemTime::now() + std::time::Duration::from_secs(300)
+        });
+        assert!(
+            got >= before && got < SystemTime::now() + std::time::Duration::from_secs(60),
+            "{got:?}"
+        );
+        assert!(
+            !d.path().join(".clock-probe.PC1.1").exists(),
+            "the probe file is removed"
+        );
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);
     }
 
@@ -348,13 +388,18 @@ mod tests {
         let p = lock_path(&d);
         // The holder just beat, by a correct clock.
         let real = SystemTime::now();
-        let real_ts = chrono::DateTime::<chrono::Utc>::from(real).fixed_offset().trunc_subsecs(0);
+        let real_ts = chrono::DateTime::<chrono::Utc>::from(real)
+            .fixed_offset()
+            .trunc_subsecs(0);
         let holder = info(1, real_ts);
         write_lock(&p, &holder);
         // The taker's clock runs 5 minutes fast.
         let fast = real + std::time::Duration::from_secs(300);
         let fast_ts = real_ts + Duration::minutes(5);
-        assert!(is_stale_at(&p, &holder, fast).unwrap(), "judged by the fast local clock, the lock looks stale");
+        assert!(
+            is_stale_at(&p, &holder, fast).unwrap(),
+            "judged by the fast local clock, the lock looks stale"
+        );
         let b = info(2, fast_ts);
         let got = try_acquire_with(&p, &b, fast_ts, || server_now_with(&p, &b, || fast)).unwrap();
         assert_eq!(got, Acquire::HeldBy(holder));
@@ -403,7 +448,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = lock_path(&d);
         let me = info(7, t0());
-        assert_eq!(tmp_path(&p, &me).file_name().unwrap(), "edit.lock.PC1.7.tmp");
+        assert_eq!(
+            tmp_path(&p, &me).file_name().unwrap(),
+            "edit.lock.PC1.7.tmp"
+        );
     }
 
     #[test]
@@ -445,7 +493,10 @@ mod tests {
         set_mtime(&p, sys(t0()));
         let now = t0() + Duration::seconds(121);
         let b = info(2, now);
-        assert_eq!(try_acquire_with(&p, &b, now, || sys(now)).unwrap(), Acquire::TookOverStale(a));
+        assert_eq!(
+            try_acquire_with(&p, &b, now, || sys(now)).unwrap(),
+            Acquire::TookOverStale(a)
+        );
         assert!(is_owner(&p, &b).unwrap());
     }
 
@@ -458,7 +509,10 @@ mod tests {
         set_mtime(&p, sys(t0()));
         let now = t0() + Duration::seconds(119);
         let b = info(2, now);
-        assert_eq!(try_acquire_with(&p, &b, now, || sys(now)).unwrap(), Acquire::HeldBy(a));
+        assert_eq!(
+            try_acquire_with(&p, &b, now, || sys(now)).unwrap(),
+            Acquire::HeldBy(a)
+        );
     }
 
     #[test]
@@ -473,7 +527,10 @@ mod tests {
         let p = lock_path(&d);
         fs::write(&p, b"{ not json").unwrap();
         set_mtime(&p, sys(t0() - Duration::seconds(121)));
-        assert_eq!(read_lock(&p).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            read_lock(&p).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         let me = info(2, t0());
         match try_acquire_with(&p, &me, t0(), || sys(t0())).unwrap() {
             Acquire::TookOverStale(prev) => assert_eq!(prev.user, "unknown"),

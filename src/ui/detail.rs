@@ -9,7 +9,10 @@ use crate::dates::fmt_date;
 use crate::model::{AssignState, Data, Id, Rule, Ts};
 use crate::ops::{self, Actor, OpError};
 use crate::query::{history, split_history, HistoryEntry, HISTORY_DEFAULT};
-use crate::schedule::{classify, completion_variance, next_due, stage_label, variance_tag, DueInfo, DueSource, PairState};
+use crate::schedule::{
+    classify, completion_variance, next_due, stage_label, variance_tag, DueInfo, DueSource,
+    PairState,
+};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{heading, medium, Palette};
 use crate::ui::widgets::{date_picker, due_pill, icon_button};
@@ -18,9 +21,21 @@ use crate::ui::widgets::{date_picker, due_pill, icon_button};
 pub(crate) enum DetailForm {
     #[default]
     None,
-    Complete { date: NaiveDate, stage: u32, comment: String },
-    Delay { note: String, expected: Option<NaiveDate> },
-    EditRecord { id: Id, date: NaiveDate, stage: u32, comment: String },
+    Complete {
+        date: NaiveDate,
+        stage: u32,
+        comment: String,
+    },
+    Delay {
+        note: String,
+        expected: Option<NaiveDate>,
+    },
+    EditRecord {
+        id: Id,
+        date: NaiveDate,
+        stage: u32,
+        comment: String,
+    },
 }
 
 /// An action waiting for an inline "are you sure?".
@@ -48,10 +63,22 @@ pub(crate) struct DetailState {
 
 /// A change requested this frame, applied once drawing is done.
 enum Op {
-    Complete { date: NaiveDate, stage: u32, comment: String },
-    Edit { id: Id, date: NaiveDate, stage: u32, comment: String },
+    Complete {
+        date: NaiveDate,
+        stage: u32,
+        comment: String,
+    },
+    Edit {
+        id: Id,
+        date: NaiveDate,
+        stage: u32,
+        comment: String,
+    },
     DeleteRecord(Id),
-    Delay { note: String, expected: Option<NaiveDate> },
+    Delay {
+        note: String,
+        expected: Option<NaiveDate>,
+    },
     DeleteDelay(Id),
     Skip(u32),
     Due(Option<NaiveDate>),
@@ -59,12 +86,18 @@ enum Op {
 }
 
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut DetailState) {
-    let Some(target) = cx.open_detail.clone() else { return };
+    let Some(target) = cx.open_detail.clone() else {
+        return;
+    };
     if state.target.as_ref() != Some(&target) {
-        *state = DetailState { target: Some(target.clone()), ..DetailState::default() };
+        *state = DetailState {
+            target: Some(target.clone()),
+            ..DetailState::default()
+        };
     }
     // Esc closes the panel, unless it is closing a popup, a modal or a text field.
-    let busy = egui::Popup::is_any_open(ui.ctx()) || ui.memory(|m| m.focused().is_some() || m.top_modal_layer().is_some());
+    let busy = egui::Popup::is_any_open(ui.ctx())
+        || ui.memory(|m| m.focused().is_some() || m.top_modal_layer().is_some());
     if ui.input(|i| i.key_pressed(Key::Escape)) && !busy {
         *cx.open_detail = None;
         return;
@@ -81,26 +114,46 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut DetailState) {
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         let data = cx.session.data();
         let (Some(staff), Some((sec, test))) = (data.staff(&staff_id), data.test(&test_id)) else {
-            close = header(ui, cx.pal, "Not found", "This person or test no longer exists.");
+            close = header(
+                ui,
+                cx.pal,
+                "Not found",
+                "This person or test no longer exists.",
+            );
             return;
         };
-        close = header(ui, cx.pal, &staff.name, &format!("{} \u{b7} {}", test.name, sec.name));
+        close = header(
+            ui,
+            cx.pal,
+            &staff.name,
+            &format!("{} \u{b7} {}", test.name, sec.name),
+        );
         let rule = data.rule_for_test(&test_id);
         let pair = pair_state(data, &staff_id, &test_id);
         let assign = staff.assignments.get(&test_id).map(|a| a.state);
         let info = next_due(rule, &pair, &data.settings);
         let editing = cx.session.is_editing();
-        let view = View { pal: cx.pal, data, rule, editing, today: cx.today };
+        let view = View {
+            pal: cx.pal,
+            data,
+            rule,
+            editing,
+            today: cx.today,
+        };
         ui.add_space(6.0);
         match assign {
             Some(AssignState::Assigned) => {
                 ui.horizontal(|ui| {
                     let status = classify(info.due_on, cx.today, data.settings.due_soon_days);
                     let delayed = data.delay_notes.iter().any(|n| {
-                        n.staff_id == staff_id && n.test_id == test_id && n.for_stage_index == info.next_stage_index
+                        n.staff_id == staff_id
+                            && n.test_id == test_id
+                            && n.for_stage_index == info.next_stage_index
                     });
                     due_pill(ui, cx.pal, &info, status, delayed);
-                    ui.label(RichText::new(format!("for {}", info.next_stage_label)).color(cx.pal.muted));
+                    ui.label(
+                        RichText::new(format!("for {}", info.next_stage_label)).color(cx.pal.muted),
+                    );
                 });
             }
             Some(AssignState::Na) => {
@@ -157,10 +210,26 @@ fn header(ui: &mut egui::Ui, pal: &Palette, title: &str, subtitle: &str) -> bool
 fn pair_state<'a>(data: &'a Data, staff_id: &str, test_id: &str) -> PairState<'a> {
     let is = |s: &str, t: &str| s == staff_id && t == test_id;
     PairState {
-        records: data.records.iter().filter(|r| is(&r.staff_id, &r.test_id)).collect(),
-        skipped: data.skipped.iter().filter(|s| is(&s.staff_id, &s.test_id)).map(|s| s.stage_index).collect(),
-        override_: data.due_overrides.iter().filter(|o| is(&o.staff_id, &o.test_id)).max_by_key(|o| o.at),
-        assigned_on: data.staff(staff_id).and_then(|s| s.assignments.get(test_id)).map(|a| a.since),
+        records: data
+            .records
+            .iter()
+            .filter(|r| is(&r.staff_id, &r.test_id))
+            .collect(),
+        skipped: data
+            .skipped
+            .iter()
+            .filter(|s| is(&s.staff_id, &s.test_id))
+            .map(|s| s.stage_index)
+            .collect(),
+        override_: data
+            .due_overrides
+            .iter()
+            .filter(|o| is(&o.staff_id, &o.test_id))
+            .max_by_key(|o| o.at),
+        assigned_on: data
+            .staff(staff_id)
+            .and_then(|s| s.assignments.get(test_id))
+            .map(|a| a.since),
     }
 }
 
@@ -177,14 +246,25 @@ fn actions(
     ui.horizontal_wrapped(|ui| match assign {
         Some(AssignState::Assigned) => {
             if ui.add_enabled(on, Button::new("Mark complete")).clicked() {
-                state.form = DetailForm::Complete { date: v.today, stage: info.next_stage_index, comment: String::new() };
+                state.form = DetailForm::Complete {
+                    date: v.today,
+                    stage: info.next_stage_index,
+                    comment: String::new(),
+                };
                 state.error = None;
             }
             if ui.add_enabled(on, Button::new("Add delay note")).clicked() {
-                state.form = DetailForm::Delay { note: String::new(), expected: None };
+                state.form = DetailForm::Delay {
+                    note: String::new(),
+                    expected: None,
+                };
                 state.error = None;
             }
-            if ui.add_enabled(on, Button::new("Skip stage")).on_hover_text(format!("Skip {}", info.next_stage_label)).clicked() {
+            if ui
+                .add_enabled(on, Button::new("Skip stage"))
+                .on_hover_text(format!("Skip {}", info.next_stage_label))
+                .clicked()
+            {
                 state.confirm = Some(Confirm::Skip(info.next_stage_index));
             }
             if ui.add_enabled(on, Button::new("Set due date")).clicked() {
@@ -202,7 +282,10 @@ fn actions(
             });
         }
         Some(AssignState::Na) | None => {
-            if ui.add_enabled(on, Button::new(format!("{}  Assign", icon::PLUS))).clicked() {
+            if ui
+                .add_enabled(on, Button::new(format!("{}  Assign", icon::PLUS)))
+                .clicked()
+            {
                 op = Some(Op::Assign(Some(AssignState::Assigned)));
             }
             if assign.is_some() && ui.add_enabled(on, Button::new("Unassign")).clicked() {
@@ -211,7 +294,11 @@ fn actions(
         }
     });
     if !on {
-        ui.label(RichText::new("Start editing to make changes.").color(v.pal.muted).size(12.5));
+        ui.label(
+            RichText::new("Start editing to make changes.")
+                .color(v.pal.muted)
+                .size(12.5),
+        );
     }
     if assign != Some(AssignState::Assigned) {
         // Only an assigned test can be completed, delayed, skipped or rescheduled.
@@ -225,7 +312,12 @@ fn actions(
     }
     match state.confirm.clone() {
         Some(Confirm::Unassign) => {
-            if let Some(yes) = confirm_row(ui, v.pal, "Remove this assignment? Its history is kept.", "Unassign") {
+            if let Some(yes) = confirm_row(
+                ui,
+                v.pal,
+                "Remove this assignment? Its history is kept.",
+                "Unassign",
+            ) {
                 state.confirm = None;
                 if yes {
                     op = Some(Op::Assign(None));
@@ -253,7 +345,10 @@ fn actions(
                     done = Some(Some(Op::Due(Some(*date))));
                 }
                 let has_override = matches!(info.source, DueSource::Manual | DueSource::Excel);
-                if ui.add_enabled(on && has_override, Button::new("Clear")).clicked() {
+                if ui
+                    .add_enabled(on && has_override, Button::new("Clear"))
+                    .clicked()
+                {
                     done = Some(Some(Op::Due(None)));
                 }
                 if ui.button("Cancel").clicked() {
@@ -277,33 +372,61 @@ fn form(ui: &mut egui::Ui, v: &View, state: &mut DetailState, info: &DueInfo) ->
     let mut op = None;
     let mut cancel = false;
     let on = v.editing;
-    let max_stage = info.next_stage_index.max(v.rule.stages.len().saturating_sub(1) as u32) + 1;
+    let max_stage = info
+        .next_stage_index
+        .max(v.rule.stages.len().saturating_sub(1) as u32)
+        + 1;
     match &mut state.form {
         DetailForm::None => return None,
-        DetailForm::Complete { date, stage, comment } => card(ui, v.pal, |ui| {
+        DetailForm::Complete {
+            date,
+            stage,
+            comment,
+        } => card(ui, v.pal, |ui| {
             ui.label(RichText::new("Mark complete").family(medium()));
             date_stage_comment(ui, v.rule, date, stage, comment, max_stage, "complete");
             ui.horizontal(|ui| {
                 if ui.add_enabled(on, Button::new("Save")).clicked() {
-                    op = Some(Op::Complete { date: *date, stage: *stage, comment: comment.trim().to_owned() });
+                    op = Some(Op::Complete {
+                        date: *date,
+                        stage: *stage,
+                        comment: comment.trim().to_owned(),
+                    });
                 }
                 cancel = ui.button("Cancel").clicked();
             });
         }),
-        DetailForm::EditRecord { id, date, stage, comment } => card(ui, v.pal, |ui| {
+        DetailForm::EditRecord {
+            id,
+            date,
+            stage,
+            comment,
+        } => card(ui, v.pal, |ui| {
             ui.label(RichText::new("Edit entry").family(medium()));
             let max = max_stage.max(*stage + 1);
             date_stage_comment(ui, v.rule, date, stage, comment, max, "edit");
             ui.horizontal(|ui| {
                 if ui.add_enabled(on, Button::new("Save")).clicked() {
-                    op = Some(Op::Edit { id: id.clone(), date: *date, stage: *stage, comment: comment.trim().to_owned() });
+                    op = Some(Op::Edit {
+                        id: id.clone(),
+                        date: *date,
+                        stage: *stage,
+                        comment: comment.trim().to_owned(),
+                    });
                 }
                 cancel = ui.button("Cancel").clicked();
             });
         }),
         DetailForm::Delay { note, expected } => card(ui, v.pal, |ui| {
-            ui.label(RichText::new(format!("Delay note for {}", info.next_stage_label)).family(medium()));
-            ui.add(TextEdit::multiline(note).hint_text("Reason").desired_rows(2).desired_width(f32::INFINITY));
+            ui.label(
+                RichText::new(format!("Delay note for {}", info.next_stage_label)).family(medium()),
+            );
+            ui.add(
+                TextEdit::multiline(note)
+                    .hint_text("Reason")
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
             ui.horizontal(|ui| {
                 let mut has = expected.is_some();
                 if ui.checkbox(&mut has, "Expected completion").changed() {
@@ -314,8 +437,14 @@ fn form(ui: &mut egui::Ui, v: &View, state: &mut DetailState, info: &DueInfo) ->
                 }
             });
             ui.horizontal(|ui| {
-                if ui.add_enabled(on && !note.trim().is_empty(), Button::new("Save")).clicked() {
-                    op = Some(Op::Delay { note: note.trim().to_owned(), expected: *expected });
+                if ui
+                    .add_enabled(on && !note.trim().is_empty(), Button::new("Save"))
+                    .clicked()
+                {
+                    op = Some(Op::Delay {
+                        note: note.trim().to_owned(),
+                        expected: *expected,
+                    });
                 }
                 cancel = ui.button("Cancel").clicked();
             });
@@ -339,13 +468,20 @@ fn date_stage_comment(
 ) {
     ui.horizontal(|ui| {
         date_picker(ui, date, salt);
-        ComboBox::from_id_salt(("stage", salt)).selected_text(stage_label(rule, *stage)).show_ui(ui, |ui| {
-            for i in 0..=max_stage {
-                ui.selectable_value(stage, i, stage_label(rule, i));
-            }
-        });
+        ComboBox::from_id_salt(("stage", salt))
+            .selected_text(stage_label(rule, *stage))
+            .show_ui(ui, |ui| {
+                for i in 0..=max_stage {
+                    ui.selectable_value(stage, i, stage_label(rule, i));
+                }
+            });
     });
-    ui.add(TextEdit::multiline(comment).hint_text("Comment (optional)").desired_rows(2).desired_width(f32::INFINITY));
+    ui.add(
+        TextEdit::multiline(comment)
+            .hint_text("Comment (optional)")
+            .desired_rows(2)
+            .desired_width(f32::INFINITY),
+    );
 }
 
 fn card<R>(ui: &mut egui::Ui, pal: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -380,9 +516,13 @@ fn confirm_row(ui: &mut egui::Ui, pal: &Palette, text: &str, yes: &str) -> Optio
 }
 
 fn tag(ui: &mut egui::Ui, text: &str, fill: egui::Color32, fg: egui::Color32) {
-    Frame::new().fill(fill).corner_radius(255).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-        ui.label(RichText::new(text).size(11.5).color(fg));
-    });
+    Frame::new()
+        .fill(fill)
+        .corner_radius(255)
+        .inner_margin(Margin::symmetric(8, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(11.5).color(fg));
+        });
 }
 
 fn by_line(ui: &mut egui::Ui, pal: &Palette, by: &str, at: Ts) {
@@ -422,14 +562,24 @@ fn history_list(
     op
 }
 
-fn entry(ui: &mut egui::Ui, v: &View, state: &mut DetailState, e: &HistoryEntry, pair: &PairState) -> Option<Op> {
+fn entry(
+    ui: &mut egui::Ui,
+    v: &View,
+    state: &mut DetailState,
+    e: &HistoryEntry,
+    pair: &PairState,
+) -> Option<Op> {
     let pal = v.pal;
     let mut op = None;
     let line = |text: String| RichText::new(text).family(medium()).color(pal.text);
     ui.spacing_mut().item_spacing.y = 4.0;
     match *e {
         HistoryEntry::Completion(r) => {
-            let label = if r.stage_label.is_empty() { stage_label(v.rule, r.stage_index) } else { r.stage_label.clone() };
+            let label = if r.stage_label.is_empty() {
+                stage_label(v.rule, r.stage_index)
+            } else {
+                r.stage_label.clone()
+            };
             ui.horizontal(|ui| {
                 ui.label(line(format!("{label} \u{b7} {}", fmt_date(r.completed_on))));
                 if v.editing {
@@ -454,11 +604,17 @@ fn entry(ui: &mut egui::Ui, v: &View, state: &mut DetailState, e: &HistoryEntry,
             }
             by_line(ui, pal, &r.by, r.at);
             let tolerance = v.data.settings.variance_tolerance_days;
-            let variance = completion_variance(v.rule, pair, &r.id).and_then(|d| variance_tag(d, tolerance));
+            let variance =
+                completion_variance(v.rule, pair, &r.id).and_then(|d| variance_tag(d, tolerance));
             if r.unconfirmed || variance.is_some() {
                 ui.horizontal(|ui| {
                     if r.unconfirmed {
-                        tag(ui, "unconfirmed \u{2013} from Excel", pal.yellow_bg, pal.yellow_fg);
+                        tag(
+                            ui,
+                            "unconfirmed \u{2013} from Excel",
+                            pal.yellow_bg,
+                            pal.yellow_fg,
+                        );
                     }
                     if let Some(t) = &variance {
                         tag(ui, t, pal.grey_bg, pal.grey_fg);
@@ -466,7 +622,12 @@ fn entry(ui: &mut egui::Ui, v: &View, state: &mut DetailState, e: &HistoryEntry,
                 });
             }
             if state.confirm == Some(Confirm::DeleteRecord(r.id.clone())) {
-                if let Some(yes) = confirm_row(ui, pal, "Delete this entry? This can't be undone.", "Delete") {
+                if let Some(yes) = confirm_row(
+                    ui,
+                    pal,
+                    "Delete this entry? This can't be undone.",
+                    "Delete",
+                ) {
                     state.confirm = None;
                     if yes {
                         op = Some(Op::DeleteRecord(r.id.clone()));
@@ -528,10 +689,21 @@ fn apply(cx: &mut Ctx, state: &mut DetailState, staff_id: &str, test_id: &str, o
     };
     let run = |d: &mut Data, a: &Actor| -> Result<(), OpError> {
         match op {
-            Op::Complete { date, stage, comment } => ops::add_completion(d, a, s, t, stage, date, &comment).map(drop),
-            Op::Edit { id, date, stage, comment } => ops::edit_record(d, a, &id, date, stage, &comment),
+            Op::Complete {
+                date,
+                stage,
+                comment,
+            } => ops::add_completion(d, a, s, t, stage, date, &comment).map(drop),
+            Op::Edit {
+                id,
+                date,
+                stage,
+                comment,
+            } => ops::edit_record(d, a, &id, date, stage, &comment),
             Op::DeleteRecord(id) => ops::delete_record(d, a, &id),
-            Op::Delay { note, expected } => ops::add_delay_note(d, a, s, t, stage_for_delay(d, s, t), &note, expected).map(drop),
+            Op::Delay { note, expected } => {
+                ops::add_delay_note(d, a, s, t, stage_for_delay(d, s, t), &note, expected).map(drop)
+            }
             Op::DeleteDelay(id) => ops::delete_delay_note(d, a, &id),
             Op::Skip(stage) => ops::set_skipped(d, a, s, t, stage, true),
             Op::Due(due) => ops::set_due_override(d, a, s, t, due),
@@ -548,7 +720,9 @@ fn apply(cx: &mut Ctx, state: &mut DetailState, staff_id: &str, test_id: &str, o
             }
             cx.toasts.push(Toast::new(done));
         }
-        Some(Err(OpError::FutureDate)) => state.error = Some("Completion date can't be in the future".to_owned()),
+        Some(Err(OpError::FutureDate)) => {
+            state.error = Some("Completion date can't be in the future".to_owned())
+        }
         Some(Err(e)) => state.error = Some(format!("Couldn't save: {e}")),
         None => state.error = Some("Start editing to make changes".to_owned()),
     }
@@ -556,5 +730,10 @@ fn apply(cx: &mut Ctx, state: &mut DetailState, staff_id: &str, test_id: &str, o
 
 /// The stage a new delay note attaches to: the current next-due stage.
 fn stage_for_delay(d: &Data, staff_id: &str, test_id: &str) -> u32 {
-    next_due(d.rule_for_test(test_id), &pair_state(d, staff_id, test_id), &d.settings).next_stage_index
+    next_due(
+        d.rule_for_test(test_id),
+        &pair_state(d, staff_id, test_id),
+        &d.settings,
+    )
+    .next_stage_index
 }

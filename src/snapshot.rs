@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -57,7 +57,11 @@ pub fn resolve_data_dir_with_source(exe_dir: &Path) -> (DataDir, bool) {
     let configured = fs::read_to_string(exe_dir.join(CONFIG_FILE))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("data_dir").and_then(|d| d.as_str()).map(str::to_owned))
+        .and_then(|v| {
+            v.get("data_dir")
+                .and_then(|d| d.as_str())
+                .map(str::to_owned)
+        })
         .filter(|s| !s.trim().is_empty());
     let from_config = configured.is_some();
     let root = match configured {
@@ -80,13 +84,22 @@ pub fn first_run_prompt(dir: &DataDir, from_config: bool) -> Option<String> {
     } else {
         "This is in the same folder as the application."
     };
-    Some(format!("No data folder was found. A new data folder will be created here:\n\n{}\n\n{source}", path.display()))
+    Some(format!(
+        "No data folder was found. A new data folder will be created here:\n\n{}\n\n{source}",
+        path.display()
+    ))
 }
 
 pub fn sanitize_user(user: &str) -> String {
     let cleaned: String = user
         .chars()
-        .map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "\\/:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = cleaned.trim_matches(|c| c == ' ' || c == '.');
     if trimmed.is_empty() {
@@ -129,7 +142,10 @@ const IO_RETRY_DELAY: Duration = Duration::from_millis(150);
 /// Runs `op`, retrying up to `IO_RETRIES` more times (150 ms apart) while
 /// `retry_on` accepts the error. Shared folders often hold files open briefly
 /// (antivirus, sync clients).
-fn retry_io<T>(mut op: impl FnMut() -> io::Result<T>, retry_on: impl Fn(&io::Error) -> bool) -> io::Result<T> {
+fn retry_io<T>(
+    mut op: impl FnMut() -> io::Result<T>,
+    retry_on: impl Fn(&io::Error) -> bool,
+) -> io::Result<T> {
     let mut retries = 0;
     loop {
         match op() {
@@ -173,7 +189,11 @@ fn scan(dir: &DataDir) -> io::Result<ScanResult> {
         .map(|e| e.map(|e| e.path()))
         .collect::<io::Result<Vec<_>>>()?
         .into_iter()
-        .filter(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("json")))
+        .filter(|p| {
+            p.extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        })
         .collect();
     paths.sort();
     for path in paths {
@@ -245,15 +265,24 @@ impl ScanCache {
                 Some(latest) => return Ok(latest),
                 // The winner vanished or changed between the scan and its load.
                 None if attempt < SCAN_ATTEMPTS => attempt += 1,
-                None => return Err(io::Error::other("The newest snapshot kept changing while it was loaded")),
+                None => {
+                    return Err(io::Error::other(
+                        "The newest snapshot kept changing while it was loaded",
+                    ))
+                }
             }
         }
     }
 
     /// One scan; `None` when the winner could not be loaded after all.
-    fn try_load_latest(&mut self, dir: &DataDir, have: Option<&Newest>) -> io::Result<Option<Latest>> {
+    fn try_load_latest(
+        &mut self,
+        dir: &DataDir,
+        have: Option<&Newest>,
+    ) -> io::Result<Option<Latest>> {
         let keys = list_snapshots(dir)?;
-        self.files.retain(|path, _| keys.iter().any(|k| k.path == *path));
+        self.files
+            .retain(|path, _| keys.iter().any(|k| k.path == *path));
         let mut corrupt = Vec::new();
         // The best so far, with its data when it was parsed during this scan.
         let mut best: Option<(Newest, Option<Data>)> = None;
@@ -261,7 +290,9 @@ impl ScanCache {
             let (saved_at, fresh) = match self.files.get(&key.path) {
                 Some((cached, saved_at)) if *cached == key => (*saved_at, None),
                 _ => {
-                    let Some(bytes) = self.read(&key.path)? else { continue };
+                    let Some(bytes) = self.read(&key.path)? else {
+                        continue;
+                    };
                     let parsed = serde_json::from_slice::<Data>(&bytes).ok();
                     let saved_at = parsed.as_ref().map(|d| d.saved_at);
                     self.files.insert(key.path.clone(), (key.clone(), saved_at));
@@ -278,14 +309,25 @@ impl ScanCache {
             }
         }
         let Some((newest, fresh)) = best else {
-            return Ok(Some(Latest { newest: None, loaded: None, corrupt }));
+            return Ok(Some(Latest {
+                newest: None,
+                loaded: None,
+                corrupt,
+            }));
         };
         if have == Some(&newest) {
-            return Ok(Some(Latest { newest: Some(newest), loaded: None, corrupt }));
+            return Ok(Some(Latest {
+                newest: Some(newest),
+                loaded: None,
+                corrupt,
+            }));
         }
         let data = match fresh {
             Some(d) => d,
-            None => match self.read(&newest.key.path)?.and_then(|b| serde_json::from_slice::<Data>(&b).ok()) {
+            None => match self
+                .read(&newest.key.path)?
+                .and_then(|b| serde_json::from_slice::<Data>(&b).ok())
+            {
                 Some(d) => d,
                 None => {
                     self.files.remove(&newest.key.path);
@@ -294,16 +336,27 @@ impl ScanCache {
             },
         };
         let loaded = loaded(data, newest.key.path.clone(), corrupt.clone());
-        let newest = Newest { saved_at: loaded.data.saved_at, ..newest };
-        Ok(Some(Latest { newest: Some(newest), loaded: Some(loaded), corrupt }))
+        let newest = Newest {
+            saved_at: loaded.data.saved_at,
+            ..newest
+        };
+        Ok(Some(Latest {
+            newest: Some(newest),
+            loaded: Some(loaded),
+            corrupt,
+        }))
     }
 
     /// Records a snapshot we just wrote, so the next scan need not read it.
     /// Returns it as the newest. The key comes from a folder listing, like a
     /// scan's (a listing's times can differ from the file's own metadata).
     pub fn note_saved(&mut self, dir: &DataDir, path: &Path, saved_at: Ts) -> Option<Newest> {
-        let key = list_snapshots(dir).ok()?.into_iter().find(|k| k.path == path)?;
-        self.files.insert(key.path.clone(), (key.clone(), Some(saved_at)));
+        let key = list_snapshots(dir)
+            .ok()?
+            .into_iter()
+            .find(|k| k.path == path)?;
+        self.files
+            .insert(key.path.clone(), (key.clone(), Some(saved_at)));
         Some(Newest { key, saved_at })
     }
 
@@ -330,7 +383,11 @@ fn list_snapshots(dir: &DataDir) -> io::Result<Vec<FileKey>> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if !path.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("json")) {
+        if !path
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        {
             continue;
         }
         let meta = match entry.metadata() {
@@ -339,7 +396,11 @@ fn list_snapshots(dir: &DataDir) -> io::Result<Vec<FileKey>> {
             Err(e) => return Err(e),
         };
         // A directory named *.json is never cached: its read fails every time.
-        keys.push(FileKey { path, len: meta.len(), modified: meta.modified().ok() });
+        keys.push(FileKey {
+            path,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        });
     }
     keys.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(keys)
@@ -348,12 +409,19 @@ fn list_snapshots(dir: &DataDir) -> io::Result<Vec<FileKey>> {
 fn loaded(mut data: Data, path: PathBuf, corrupt: Vec<PathBuf>) -> Loaded {
     data.ensure_valid();
     let read_only_newer_schema = data.schema_version > SCHEMA_VERSION;
-    Loaded { data, path, corrupt, read_only_newer_schema }
+    Loaded {
+        data,
+        path,
+        corrupt,
+        read_only_newer_schema,
+    }
 }
 
 /// Loads the snapshot with the newest `saved_at`.
 pub fn load_latest(dir: &DataDir) -> io::Result<Option<Loaded>> {
-    ScanCache::default().load_latest(dir, None).map(|l| l.loaded)
+    ScanCache::default()
+        .load_latest(dir, None)
+        .map(|l| l.loaded)
 }
 
 /// Moves snapshots older than `keep_days` into the archive folder; the newest
@@ -393,7 +461,10 @@ mod tests {
     }
 
     fn ts(y: i32, m: u32, d: u32) -> Ts {
-        chrono::FixedOffset::east_opt(8 * 3600).unwrap().with_ymd_and_hms(y, m, d, 9, 0, 0).unwrap()
+        chrono::FixedOffset::east_opt(8 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(y, m, d, 9, 0, 0)
+            .unwrap()
     }
 
     fn data_at(t: Ts, by: &str) -> Data {
@@ -402,25 +473,40 @@ mod tests {
 
     fn set_mtime(path: &Path, secs_from_epoch: u64) {
         let f = fs::OpenOptions::new().write(true).open(path).unwrap();
-        f.set_modified(SystemTime::UNIX_EPOCH + StdDuration::from_secs(secs_from_epoch)).unwrap();
+        f.set_modified(SystemTime::UNIX_EPOCH + StdDuration::from_secs(secs_from_epoch))
+            .unwrap();
     }
 
     fn dir_in(tmp: &tempfile::TempDir) -> DataDir {
-        let d = DataDir { root: tmp.path().to_path_buf() };
+        let d = DataDir {
+            root: tmp.path().to_path_buf(),
+        };
         d.ensure().unwrap();
         d
     }
 
     #[test]
     fn file_name_format() {
-        assert_eq!(snapshot_file_name(ymd(2026, 11, 14), "jtan"), "14 Nov 2026 - jtan.json");
-        assert_eq!(snapshot_file_name(ymd(2026, 12, 2), "jtan"), "2 Dec 2026 - jtan.json");
+        assert_eq!(
+            snapshot_file_name(ymd(2026, 11, 14), "jtan"),
+            "14 Nov 2026 - jtan.json"
+        );
+        assert_eq!(
+            snapshot_file_name(ymd(2026, 12, 2), "jtan"),
+            "2 Dec 2026 - jtan.json"
+        );
     }
 
     #[test]
     fn file_name_sanitises_username() {
-        assert_eq!(snapshot_file_name(ymd(2026, 11, 14), "a:b*c"), "14 Nov 2026 - a_b_c.json");
-        assert_eq!(snapshot_file_name(ymd(2026, 11, 14), ""), "14 Nov 2026 - unknown.json");
+        assert_eq!(
+            snapshot_file_name(ymd(2026, 11, 14), "a:b*c"),
+            "14 Nov 2026 - a_b_c.json"
+        );
+        assert_eq!(
+            snapshot_file_name(ymd(2026, 11, 14), ""),
+            "14 Nov 2026 - unknown.json"
+        );
         assert_eq!(sanitize_user(" ..x\\y/z? "), "x_y_z_");
         assert_eq!(sanitize_user("a\"<>|b\u{7}"), "a____b_");
         assert_eq!(sanitize_user(" . "), "unknown");
@@ -432,7 +518,10 @@ mod tests {
         let d = dir_in(&tmp);
         assert_eq!(d.snapshots(), tmp.path().join("snapshots"));
         assert_eq!(d.archive(), tmp.path().join("snapshots").join("archive"));
-        assert_eq!(d.conflicts(), tmp.path().join("snapshots").join("conflicts"));
+        assert_eq!(
+            d.conflicts(),
+            tmp.path().join("snapshots").join("conflicts")
+        );
         assert_eq!(d.lock_path(), tmp.path().join("edit.lock"));
         assert_eq!(d.import_report(), tmp.path().join("import-report.txt"));
         assert!(d.archive().is_dir() && d.conflicts().is_dir());
@@ -458,7 +547,9 @@ mod tests {
     #[test]
     fn load_latest_empty_or_missing_is_none() {
         let tmp = tempfile::tempdir().unwrap();
-        let missing = DataDir { root: tmp.path().join("nope") };
+        let missing = DataDir {
+            root: tmp.path().join("nope"),
+        };
         assert!(load_latest(&missing).unwrap().is_none());
         let dir = dir_in(&tmp);
         assert!(load_latest(&dir).unwrap().is_none());
@@ -504,7 +595,11 @@ mod tests {
         save_snapshot(&dir, &data_at(ts(2026, 11, 12), "b"), "b.json").unwrap();
         let mut cache = ScanCache::default();
         let first = cache.load_latest(&dir, None).unwrap();
-        assert_eq!(cache.reads(), 2, "each file read once; the winner is not read again");
+        assert_eq!(
+            cache.reads(),
+            2,
+            "each file read once; the winner is not read again"
+        );
         assert_eq!(first.loaded.as_ref().unwrap().data.saved_by, "b");
         let newest = first.newest.clone().unwrap();
         assert_eq!(newest.saved_at, ts(2026, 11, 12));
@@ -554,7 +649,16 @@ mod tests {
         save_snapshot(&dir, &data_at(ts(2026, 11, 10), "older"), "older.json").unwrap();
         save_snapshot(&dir, &data_at(ts(2026, 11, 12), "newer"), "newer.json").unwrap();
         let mut cache = ScanCache::default();
-        assert_eq!(cache.load_latest(&dir, None).unwrap().loaded.unwrap().data.saved_by, "newer");
+        assert_eq!(
+            cache
+                .load_latest(&dir, None)
+                .unwrap()
+                .loaded
+                .unwrap()
+                .data
+                .saved_by,
+            "newer"
+        );
         // An unreadable candidate is still an error, every time.
         fs::create_dir(dir.snapshots().join("x.json")).unwrap();
         assert!(cache.load_latest(&dir, None).is_err());
@@ -564,7 +668,10 @@ mod tests {
         fs::remove_file(dir.snapshots().join("newer.json")).unwrap();
         let l = cache.load_latest(&dir, None).unwrap();
         assert_eq!(l.loaded.unwrap().data.saved_by, "older");
-        assert_eq!(l.newest.unwrap().key.path, dir.snapshots().join("older.json"));
+        assert_eq!(
+            l.newest.unwrap().key.path,
+            dir.snapshots().join("older.json")
+        );
     }
 
     #[test]
@@ -576,7 +683,11 @@ mod tests {
         let r = retry_io(
             || {
                 calls += 1;
-                if calls < 3 { Err(denied()) } else { Ok(7) }
+                if calls < 3 {
+                    Err(denied())
+                } else {
+                    Ok(7)
+                }
             },
             is_denied,
         );
@@ -621,7 +732,10 @@ mod tests {
             .filter(|e| e.path().is_file())
             .collect();
         assert_eq!(entries.len(), 1);
-        assert_eq!(load_latest(&dir).unwrap().unwrap().data.saved_at, ts(2026, 11, 15));
+        assert_eq!(
+            load_latest(&dir).unwrap().unwrap().data.saved_at,
+            ts(2026, 11, 15)
+        );
     }
 
     #[test]
@@ -631,8 +745,14 @@ mod tests {
         let mut d = data_at(ts(2026, 11, 14), "future");
         d.schema_version = 99;
         let mut v = serde_json::to_value(&d).unwrap();
-        v.as_object_mut().unwrap().insert("brand_new_field".into(), serde_json::json!({"a": 1}));
-        fs::write(dir.snapshots().join("f.json"), serde_json::to_string(&v).unwrap()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .insert("brand_new_field".into(), serde_json::json!({"a": 1}));
+        fs::write(
+            dir.snapshots().join("f.json"),
+            serde_json::to_string(&v).unwrap(),
+        )
+        .unwrap();
         let loaded = load_latest(&dir).unwrap().unwrap();
         assert!(loaded.read_only_newer_schema);
         assert!(loaded.corrupt.is_empty());
@@ -656,7 +776,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path();
         assert_eq!(resolve_data_dir(exe).root, exe.join("CompetencyData"));
-        fs::write(exe.join("tracker.config.json"), r#"{"data_dir":"..\\Shared"}"#).unwrap();
+        fs::write(
+            exe.join("tracker.config.json"),
+            r#"{"data_dir":"..\\Shared"}"#,
+        )
+        .unwrap();
         assert_eq!(resolve_data_dir(exe).root, exe.join("..\\Shared"));
         fs::write(exe.join("tracker.config.json"), "not json").unwrap();
         assert_eq!(resolve_data_dir(exe).root, exe.join("CompetencyData"));
@@ -671,19 +795,28 @@ mod tests {
         let (dir, from_config) = resolve_data_dir_with_source(exe);
         assert!(!from_config);
         let text = first_run_prompt(&dir, from_config).expect("missing folder asks");
-        assert!(text.starts_with("No data folder was found. A new data folder will be created here:\n\n"));
+        assert!(text
+            .starts_with("No data folder was found. A new data folder will be created here:\n\n"));
         assert!(text.contains(&exe.join("CompetencyData").display().to_string()));
         assert!(text.ends_with("This is in the same folder as the application."));
 
         fs::create_dir_all(&dir.root).unwrap();
-        assert_eq!(first_run_prompt(&dir, from_config), None, "existing folder: no question");
+        assert_eq!(
+            first_run_prompt(&dir, from_config),
+            None,
+            "existing folder: no question"
+        );
     }
 
     #[test]
     fn first_run_prompt_names_config_override() {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path();
-        fs::write(exe.join("tracker.config.json"), r#"{"data_dir":"Shared\\Data"}"#).unwrap();
+        fs::write(
+            exe.join("tracker.config.json"),
+            r#"{"data_dir":"Shared\\Data"}"#,
+        )
+        .unwrap();
         let (dir, from_config) = resolve_data_dir_with_source(exe);
         assert!(from_config);
         let text = first_run_prompt(&dir, from_config).unwrap();
@@ -713,7 +846,10 @@ mod tests {
         assert!(!dir.snapshots().join("a.json").exists());
 
         // Even when everything is old, the newest is never archived.
-        assert_eq!(archive_old(&dir, 0, today + Duration::days(1000)).unwrap(), 0);
+        assert_eq!(
+            archive_old(&dir, 0, today + Duration::days(1000)).unwrap(),
+            0
+        );
         assert!(dir.snapshots().join("c.json").exists());
     }
 }

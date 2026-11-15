@@ -46,7 +46,11 @@ impl StaffForm {
             name: s.name.clone(),
             title: s.title.clone(),
             joined: s.joined,
-            assign: s.assignments.iter().map(|(t, a)| (t.clone(), a.state)).collect(),
+            assign: s
+                .assignments
+                .iter()
+                .map(|(t, a)| (t.clone(), a.state))
+                .collect(),
             ..StaffForm::new()
         }
     }
@@ -64,32 +68,41 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Ctx, form: &mut StaffForm) -> b
     let data = cx.session.data();
     let frame = Frame::window(&ctx.global_style()).inner_margin(Margin::same(24));
     let mut act = Act::None;
-    let resp = Modal::new(egui::Id::new("staff_editor")).frame(frame).show(ctx, |ui| {
-        ui.set_width(520.0);
-        let heading = if form.id.is_some() { "Edit staff" } else { "Add staff" };
-        ui.label(RichText::new(heading).family(serif()).size(20.0));
-        ui.add_space(10.0);
-        fields(ui, form, cx.today);
-        ui.add_space(10.0);
-        ui.label(RichText::new("Assignments").family(medium()));
-        ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| assignments(ui, data, form));
-        if let Some(e) = &form.error {
-            ui.colored_label(cx.pal.red_fg, e);
-        }
-        if !editing {
-            ui.label(RichText::new("Start editing to make changes.").color(cx.pal.muted));
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let ready = editing && !form.name.trim().is_empty();
-            if ui.add_enabled(ready, Button::new("Save")).clicked() {
-                act = Act::Save;
+    let resp = Modal::new(egui::Id::new("staff_editor"))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(520.0);
+            let heading = if form.id.is_some() {
+                "Edit staff"
+            } else {
+                "Add staff"
+            };
+            ui.label(RichText::new(heading).family(serif()).size(20.0));
+            ui.add_space(10.0);
+            fields(ui, form, cx.today);
+            ui.add_space(10.0);
+            ui.label(RichText::new("Assignments").family(medium()));
+            ScrollArea::vertical()
+                .max_height(300.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| assignments(ui, data, form));
+            if let Some(e) = &form.error {
+                ui.colored_label(cx.pal.red_fg, e);
             }
-            if ui.button("Cancel").clicked() {
-                act = Act::Cancel;
+            if !editing {
+                ui.label(RichText::new("Start editing to make changes.").color(cx.pal.muted));
             }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let ready = editing && !form.name.trim().is_empty();
+                if ui.add_enabled(ready, Button::new("Save")).clicked() {
+                    act = Act::Save;
+                }
+                if ui.button("Cancel").clicked() {
+                    act = Act::Cancel;
+                }
+            });
         });
-    });
     if matches!(act, Act::None) && resp.should_close() {
         act = Act::Cancel;
     }
@@ -102,14 +115,22 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Ctx, form: &mut StaffForm) -> b
 
 fn fields(ui: &mut egui::Ui, form: &mut StaffForm, today: NaiveDate) {
     ui.label("Name");
-    let name = ui.add(TextEdit::singleline(&mut form.name).hint_text("Full name").desired_width(f32::INFINITY));
+    let name = ui.add(
+        TextEdit::singleline(&mut form.name)
+            .hint_text("Full name")
+            .desired_width(f32::INFINITY),
+    );
     if form.fresh {
         name.request_focus();
         form.fresh = false;
     }
     ui.add_space(4.0);
     ui.label("Title");
-    ui.add(TextEdit::singleline(&mut form.title).hint_text("e.g. Senior MLT").desired_width(f32::INFINITY));
+    ui.add(
+        TextEdit::singleline(&mut form.title)
+            .hint_text("e.g. Senior MLT")
+            .desired_width(f32::INFINITY),
+    );
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Joined");
@@ -142,7 +163,9 @@ fn assignments(ui: &mut egui::Ui, data: &Data, form: &mut StaffForm) {
         CollapsingState::load_with_default_open(ui.ctx(), id, false)
             .show_header(ui, |ui| {
                 ui.label(RichText::new(&sec.name).family(medium()));
-                let mut whole = tests.iter().all(|t| form.assign.get(&t.id) == Some(&AssignState::Assigned));
+                let mut whole = tests
+                    .iter()
+                    .all(|t| form.assign.get(&t.id) == Some(&AssignState::Assigned));
                 if ui.checkbox(&mut whole, "Assign whole section").changed() {
                     for t in &tests {
                         if whole {
@@ -174,7 +197,11 @@ fn assignments(ui: &mut egui::Ui, data: &Data, form: &mut StaffForm) {
 /// Applies the details, then the assignment differences. Returns true when saved.
 fn save(cx: &mut Ctx, form: &mut StaffForm) -> bool {
     let was_new = form.id.is_none();
-    let done = if was_new { "Staff added" } else { "Changes saved" };
+    let done = if was_new {
+        "Staff added"
+    } else {
+        "Changes saved"
+    };
     // Set as soon as the person exists, so a failure later never leads to a second add.
     let mut created: Option<Id> = None;
     let res = cx.session.mutate(cx.now, |d, a| {
@@ -189,11 +216,19 @@ fn save(cx: &mut Ctx, form: &mut StaffForm) -> bool {
                 id
             }
         };
-        let tests: Vec<Id> =
-            d.sections.iter().flat_map(|s| &s.tests).filter(|t| !t.retired).map(|t| t.id.clone()).collect();
+        let tests: Vec<Id> = d
+            .sections
+            .iter()
+            .flat_map(|s| &s.tests)
+            .filter(|t| !t.retired)
+            .map(|t| t.id.clone())
+            .collect();
         for t in tests {
             let want = form.assign.get(&t).copied();
-            let have = d.staff(&id).and_then(|s| s.assignments.get(&t)).map(|a| a.state);
+            let have = d
+                .staff(&id)
+                .and_then(|s| s.assignments.get(&t))
+                .map(|a| a.state);
             if want != have {
                 ops::set_assignment(d, a, &id, &t, want)?;
             }
@@ -214,9 +249,13 @@ fn save(cx: &mut Ctx, form: &mut StaffForm) -> bool {
             if let Some(id) = created {
                 // The person exists now: a retry must update, not add again.
                 form.id = Some(id);
-                form.error = Some(format!("Saved {name}, but couldn't apply all assignments: {e}"));
+                form.error = Some(format!(
+                    "Saved {name}, but couldn't apply all assignments: {e}"
+                ));
             } else if form.id.is_some() && !matches!(e, OpError::EmptyName | OpError::NotFound(_)) {
-                form.error = Some(format!("Saved details, but couldn't apply all assignments: {e}"));
+                form.error = Some(format!(
+                    "Saved details, but couldn't apply all assignments: {e}"
+                ));
             } else {
                 form.error = Some(format!("Couldn't save: {e}"));
             }

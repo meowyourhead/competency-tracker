@@ -68,7 +68,9 @@ impl PersonnelState {
 }
 
 fn is_assigned(s: &Staff, test_id: &str) -> bool {
-    s.assignments.get(test_id).is_some_and(|a| a.state == AssignState::Assigned)
+    s.assignments
+        .get(test_id)
+        .is_some_and(|a| a.state == AssignState::Assigned)
 }
 
 fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
@@ -82,13 +84,26 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
             let mut tests = Vec::new();
             for sec in sections.iter().filter(|x| !x.retired) {
                 let mut any = false;
-                for t in sec.tests.iter().filter(|t| !t.retired && is_assigned(s, &t.id)) {
+                for t in sec
+                    .tests
+                    .iter()
+                    .filter(|t| !t.retired && is_assigned(s, &t.id))
+                {
                     any = true;
-                    let info = next_due(data.rule_for_test(&t.id), &idx.pair(&s.id, &t.id), &data.settings);
+                    let info = next_due(
+                        data.rule_for_test(&t.id),
+                        &idx.pair(&s.id, &t.id),
+                        &data.settings,
+                    );
                     let status = classify(info.due_on, today, data.settings.due_soon_days);
-                    let delayed = idx.delay_notes(&s.id, &t.id).iter().any(|n| n.for_stage_index == info.next_stage_index);
+                    let delayed = idx
+                        .delay_notes(&s.id, &t.id)
+                        .iter()
+                        .any(|n| n.for_stage_index == info.next_stage_index);
                     tests.push((t.id.clone(), info.clone(), status, delayed));
-                    if info.due_on.is_some() && next.as_ref().is_none_or(|(n, _)| info.due_on < n.due_on) {
+                    if info.due_on.is_some()
+                        && next.as_ref().is_none_or(|(n, _)| info.due_on < n.due_on)
+                    {
                         next = Some((info, status));
                     }
                 }
@@ -96,13 +111,24 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
                     names.push(sec.name.clone());
                 }
             }
-            (s.id.clone(), Summary { sections: names, next, tests })
+            (
+                s.id.clone(),
+                Summary {
+                    sections: names,
+                    next,
+                    tests,
+                },
+            )
         })
         .collect()
 }
 
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
-    if state.profile.as_deref().is_some_and(|id| cx.session.data().staff(id).is_none()) {
+    if state
+        .profile
+        .as_deref()
+        .is_some_and(|id| cx.session.data().staff(id).is_none())
+    {
         state.profile = None;
     }
     if state.profile.is_some() {
@@ -120,8 +146,15 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) 
 
 /// Runs a status change; a toast reports the outcome.
 fn set_status(cx: &mut Ctx, id: &str, status: StaffStatus) {
-    let name = cx.session.data().staff(id).map(|s| s.name.clone()).unwrap_or_default();
-    let res = cx.session.mutate(cx.now, |d, a| ops::set_staff_status(d, a, id, status));
+    let name = cx
+        .session
+        .data()
+        .staff(id)
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let res = cx
+        .session
+        .mutate(cx.now, |d, a| ops::set_staff_status(d, a, id, status));
     let msg = match (res, status) {
         (Some(Ok(())), StaffStatus::Active) => format!("{name} is active again"),
         (Some(Ok(())), StaffStatus::Hidden) => format!("{name} hidden"),
@@ -139,7 +172,10 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
         heading(ui, "Personnel");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let add = ui.add_enabled(editing, Button::new(format!("{}  Add staff", icon::PLUS)));
-            if add.on_disabled_hover_text("Start editing to make changes").clicked() {
+            if add
+                .on_disabled_hover_text("Start editing to make changes")
+                .clicked()
+            {
                 state.editing = Some(StaffForm::new());
             }
         });
@@ -153,9 +189,13 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
     ui.add_space(12.0);
     let staff = filter_staff(data, filter);
     if staff.is_empty() {
-        let narrowed = filter.section.is_some() || filter.title.is_some() || !filter.text.trim().is_empty();
+        let narrowed =
+            filter.section.is_some() || filter.title.is_some() || !filter.text.trim().is_empty();
         let (title, body) = match (data.staff.is_empty(), narrowed) {
-            (true, _) => ("No staff yet", "Add staff here, or import your Excel tracker from Settings."),
+            (true, _) => (
+                "No staff yet",
+                "Add staff here, or import your Excel tracker from Settings.",
+            ),
             (_, true) => ("No matches", "Nobody matches these filters."),
             _ => ("Nobody here", "No staff have this status."),
         };
@@ -171,34 +211,44 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
         .inner_margin(Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            egui::Grid::new("staff_table").num_columns(6).spacing([24.0, 10.0]).show(ui, |ui| {
-                for head in ["Name", "Title", "Joined", "Sections", "Next due", ""] {
-                    ui.label(RichText::new(head).color(pal.muted).size(12.5));
-                }
-                ui.end_row();
-                for s in &staff {
-                    let name = Button::new(RichText::new(&s.name).family(medium()).color(pal.text)).frame(false);
-                    if ui.add(name).clicked() {
-                        open = Some(s.id.clone());
-                    }
-                    ui.label(RichText::new(&s.title).color(pal.muted));
-                    ui.label(RichText::new(s.joined.map_or("\u{2014}".to_owned(), fmt_date)).color(pal.muted));
-                    let sum = sums.get(&s.id);
-                    ui.horizontal(|ui| section_chips(ui, pal, sum.map_or(&[], |m| m.sections.as_slice())));
-                    match sum.and_then(|m| m.next.as_ref()) {
-                        Some((info, status)) => {
-                            due_pill(ui, pal, info, *status, false);
-                        }
-                        None => {
-                            ui.label(RichText::new("\u{2014}").color(pal.muted));
-                        }
-                    }
-                    if let Some(a) = row_menu(ui, pal, editing, s) {
-                        action = Some(a);
+            egui::Grid::new("staff_table")
+                .num_columns(6)
+                .spacing([24.0, 10.0])
+                .show(ui, |ui| {
+                    for head in ["Name", "Title", "Joined", "Sections", "Next due", ""] {
+                        ui.label(RichText::new(head).color(pal.muted).size(12.5));
                     }
                     ui.end_row();
-                }
-            });
+                    for s in &staff {
+                        let name =
+                            Button::new(RichText::new(&s.name).family(medium()).color(pal.text))
+                                .frame(false);
+                        if ui.add(name).clicked() {
+                            open = Some(s.id.clone());
+                        }
+                        ui.label(RichText::new(&s.title).color(pal.muted));
+                        ui.label(
+                            RichText::new(s.joined.map_or("\u{2014}".to_owned(), fmt_date))
+                                .color(pal.muted),
+                        );
+                        let sum = sums.get(&s.id);
+                        ui.horizontal(|ui| {
+                            section_chips(ui, pal, sum.map_or(&[], |m| m.sections.as_slice()))
+                        });
+                        match sum.and_then(|m| m.next.as_ref()) {
+                            Some((info, status)) => {
+                                due_pill(ui, pal, info, *status, false);
+                            }
+                            None => {
+                                ui.label(RichText::new("\u{2014}").color(pal.muted));
+                            }
+                        }
+                        if let Some(a) = row_menu(ui, pal, editing, s) {
+                            action = Some(a);
+                        }
+                        ui.end_row();
+                    }
+                });
         });
     if let Some(id) = open {
         state.profile = Some(id);
@@ -208,7 +258,13 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
         Some(RowAction::Status(id, st)) => set_status(cx, &id, st),
         Some(RowAction::AskDelete(id)) => {
             let name = data.staff(&id).map(|s| s.name.clone()).unwrap_or_default();
-            state.delete = Some(DeleteConfirm { id, name, text: String::new(), error: None, fresh: true });
+            state.delete = Some(DeleteConfirm {
+                id,
+                name,
+                text: String::new(),
+                error: None,
+                fresh: true,
+            });
         }
         None => {}
     }
@@ -218,9 +274,16 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
 fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, f: &mut StaffFilter) {
     search_box(ui, &mut f.text, "Search by name");
     ui.add_space(4.0);
-    let sections: Vec<(Id, String)> =
-        data.sections_sorted().into_iter().filter(|s| !s.retired).map(|s| (s.id.clone(), s.name.clone())).collect();
-    let titles: Vec<(String, String)> = distinct_titles(data).into_iter().map(|t| (t.clone(), t)).collect();
+    let sections: Vec<(Id, String)> = data
+        .sections_sorted()
+        .into_iter()
+        .filter(|s| !s.retired)
+        .map(|s| (s.id.clone(), s.name.clone()))
+        .collect();
+    let titles: Vec<(String, String)> = distinct_titles(data)
+        .into_iter()
+        .map(|t| (t.clone(), t))
+        .collect();
     ui.horizontal(|ui| {
         Frame::new()
             .fill(pal.sidebar)
@@ -231,10 +294,15 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, f: &mut StaffFilter) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     let current = f.status.unwrap_or(StaffStatus::Active);
-                    for (st, label) in
-                        [(StaffStatus::Active, "Active"), (StaffStatus::Hidden, "Hidden"), (StaffStatus::Removed, "Removed")]
-                    {
-                        if ui.add(Button::selectable(current == st, label).corner_radius(8)).clicked() {
+                    for (st, label) in [
+                        (StaffStatus::Active, "Active"),
+                        (StaffStatus::Hidden, "Hidden"),
+                        (StaffStatus::Removed, "Removed"),
+                    ] {
+                        if ui
+                            .add(Button::selectable(current == st, label).corner_radius(8))
+                            .clicked()
+                        {
                             f.status = Some(st);
                         }
                     }
@@ -243,7 +311,11 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, f: &mut StaffFilter) {
         chip_select(ui, "Section", &mut f.section, &sections);
         chip_select(ui, "Title", &mut f.title, &titles);
         let any = f.section.is_some() || f.title.is_some() || !f.text.trim().is_empty();
-        if any && ui.add(Button::new(RichText::new("Clear filters").color(pal.muted)).frame(false)).clicked() {
+        if any
+            && ui
+                .add(Button::new(RichText::new("Clear filters").color(pal.muted)).frame(false))
+                .clicked()
+        {
             f.section = None;
             f.title = None;
             f.text.clear();
@@ -257,9 +329,13 @@ fn section_chips(ui: &mut egui::Ui, pal: &Palette, names: &[String]) {
         ui.label(RichText::new("\u{2014}").color(pal.muted));
     }
     let chip = |ui: &mut egui::Ui, text: &str| {
-        Frame::new().fill(pal.grey_bg).corner_radius(255).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-            ui.label(RichText::new(text).size(11.5).color(pal.grey_fg));
-        });
+        Frame::new()
+            .fill(pal.grey_bg)
+            .corner_radius(255)
+            .inner_margin(Margin::symmetric(8, 2))
+            .show(ui, |ui| {
+                ui.label(RichText::new(text).size(11.5).color(pal.grey_fg));
+            });
     };
     for n in names.iter().take(3) {
         chip(ui, n);
@@ -271,10 +347,16 @@ fn section_chips(ui: &mut egui::Ui, pal: &Palette, names: &[String]) {
 
 /// The "..." menu of a row. Every item needs edit mode.
 fn row_menu(ui: &mut egui::Ui, pal: &Palette, editing: bool, s: &Staff) -> Option<RowAction> {
-    let resp = icon_button(ui, pal, icon::DOTS_THREE, &format!("Actions for {}", s.name));
+    let resp = icon_button(
+        ui,
+        pal,
+        icon::DOTS_THREE,
+        &format!("Actions for {}", s.name),
+    );
     let mut action = None;
     Popup::menu(&resp).show(|ui| {
-        let item =|ui: &mut egui::Ui, label: &str| ui.add_enabled(editing, Button::new(label)).clicked();
+        let item =
+            |ui: &mut egui::Ui, label: &str| ui.add_enabled(editing, Button::new(label)).clicked();
         if item(ui, "Edit") {
             action = Some(RowAction::Edit(s.id.clone()));
         }
@@ -306,7 +388,11 @@ fn row_menu(ui: &mut egui::Ui, pal: &Palette, editing: bool, s: &Staff) -> Optio
             }
         }
         if !editing {
-            ui.label(RichText::new("Start editing to make changes.").color(pal.muted).size(12.5));
+            ui.label(
+                RichText::new("Start editing to make changes.")
+                    .color(pal.muted)
+                    .size(12.5),
+            );
         }
     });
     action
@@ -318,40 +404,55 @@ fn delete_modal(ctx: &egui::Context, cx: &mut Ctx, state: &mut PersonnelState) {
     let editing = cx.session.is_editing();
     let frame = Frame::window(&ctx.global_style()).inner_margin(Margin::same(24));
     let (mut delete, mut cancel) = (false, false);
-    let resp = Modal::new(egui::Id::new("staff_delete")).frame(frame).show(ctx, |ui| {
-        ui.set_width(440.0);
-        ui.label(RichText::new("Delete permanently").family(serif()).size(20.0));
-        ui.add_space(6.0);
-        ui.label(format!("This deletes {} and all their records. It can't be undone.", d.name));
-        ui.add_space(8.0);
-        ui.label(format!("Type {} to confirm", d.name));
-        let field = ui.add(TextEdit::singleline(&mut d.text).desired_width(f32::INFINITY));
-        if d.fresh {
-            field.request_focus();
-            d.fresh = false;
-        }
-        if let Some(e) = &d.error {
-            ui.colored_label(cx.pal.red_fg, e);
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let matches = d.text.trim() == d.name;
-            let button = Button::new(RichText::new("Delete").color(cx.pal.red_fg));
-            delete = ui.add_enabled(editing && matches, button).clicked();
-            cancel = ui.button("Cancel").clicked();
+    let resp = Modal::new(egui::Id::new("staff_delete"))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(
+                RichText::new("Delete permanently")
+                    .family(serif())
+                    .size(20.0),
+            );
+            ui.add_space(6.0);
+            ui.label(format!(
+                "This deletes {} and all their records. It can't be undone.",
+                d.name
+            ));
+            ui.add_space(8.0);
+            ui.label(format!("Type {} to confirm", d.name));
+            let field = ui.add(TextEdit::singleline(&mut d.text).desired_width(f32::INFINITY));
+            if d.fresh {
+                field.request_focus();
+                d.fresh = false;
+            }
+            if let Some(e) = &d.error {
+                ui.colored_label(cx.pal.red_fg, e);
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let matches = d.text.trim() == d.name;
+                let button = Button::new(RichText::new("Delete").color(cx.pal.red_fg));
+                delete = ui.add_enabled(editing && matches, button).clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
         });
-    });
     if cancel || resp.should_close() {
         state.delete = None;
     } else if delete {
         let (id, text, name) = (d.id.clone(), d.text.clone(), d.name.clone());
-        match cx.session.mutate(cx.now, |data, a| ops::delete_staff_permanently(data, a, &id, &text)) {
+        match cx.session.mutate(cx.now, |data, a| {
+            ops::delete_staff_permanently(data, a, &id, &text)
+        }) {
             Some(Ok(())) => {
                 state.delete = None;
                 cx.toasts.push(Toast::new(format!("{name} deleted")));
             }
-            Some(Err(OpError::ConfirmMismatch)) => d.error = Some("That doesn't match the name.".to_owned()),
-            Some(Err(OpError::NotRemoved)) => d.error = Some("Only removed staff can be deleted permanently.".to_owned()),
+            Some(Err(OpError::ConfirmMismatch)) => {
+                d.error = Some("That doesn't match the name.".to_owned())
+            }
+            Some(Err(OpError::NotRemoved)) => {
+                d.error = Some("Only removed staff can be deleted permanently.".to_owned())
+            }
             Some(Err(e)) => d.error = Some(format!("Couldn't delete: {e}")),
             None => d.error = Some("Start editing to make changes".to_owned()),
         }
@@ -364,9 +465,18 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
     let editing = cx.session.is_editing();
     state.refresh(cx.session, cx.today);
     let data = cx.session.data();
-    let Some(staff) = state.profile.as_deref().and_then(|id| data.staff(id)) else { return };
-    let tests_due = state.cache.as_ref().and_then(|(_, _, m)| m.get(&staff.id)).map_or(&[][..], |m| m.tests.as_slice());
-    if ui.add(Button::new(RichText::new("\u{2190} All staff").color(pal.muted)).frame(false)).clicked() {
+    let Some(staff) = state.profile.as_deref().and_then(|id| data.staff(id)) else {
+        return;
+    };
+    let tests_due = state
+        .cache
+        .as_ref()
+        .and_then(|(_, _, m)| m.get(&staff.id))
+        .map_or(&[][..], |m| m.tests.as_slice());
+    if ui
+        .add(Button::new(RichText::new("\u{2190} All staff").color(pal.muted)).frame(false))
+        .clicked()
+    {
         state.profile = None;
         return;
     }
@@ -374,8 +484,14 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
     ui.horizontal(|ui| {
         heading(ui, &staff.name);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let edit = ui.add_enabled(editing, Button::new(format!("{}  Edit", icon::PENCIL_SIMPLE)));
-            if edit.on_disabled_hover_text("Start editing to make changes").clicked() {
+            let edit = ui.add_enabled(
+                editing,
+                Button::new(format!("{}  Edit", icon::PENCIL_SIMPLE)),
+            );
+            if edit
+                .on_disabled_hover_text("Start editing to make changes")
+                .clicked()
+            {
                 state.editing = Some(StaffForm::edit(staff));
             }
         });
@@ -398,7 +514,11 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
     let mut picked = None;
     let mut any = false;
     for sec in data.sections_sorted().into_iter().filter(|s| !s.retired) {
-        let mut tests: Vec<_> = sec.tests.iter().filter(|t| !t.retired && staff.assignments.contains_key(&t.id)).collect();
+        let mut tests: Vec<_> = sec
+            .tests
+            .iter()
+            .filter(|t| !t.retired && staff.assignments.contains_key(&t.id))
+            .collect();
         if tests.is_empty() {
             continue;
         }
@@ -418,14 +538,18 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                         if ui.add(name).clicked() {
                             picked = Some((staff.id.clone(), t.id.clone()));
                         }
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match staff.assignments[&t.id].state {
-                            AssignState::Na => {
-                                ui.label(RichText::new("N/A").color(pal.muted));
-                            }
-                            AssignState::Assigned => {
-                                if let Some((_, info, status, delayed)) = tests_due.iter().find(|(id, ..)| *id == t.id) {
-                                    if due_pill(ui, pal, info, *status, *delayed).clicked() {
-                                        picked = Some((staff.id.clone(), t.id.clone()));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            match staff.assignments[&t.id].state {
+                                AssignState::Na => {
+                                    ui.label(RichText::new("N/A").color(pal.muted));
+                                }
+                                AssignState::Assigned => {
+                                    if let Some((_, info, status, delayed)) =
+                                        tests_due.iter().find(|(id, ..)| *id == t.id)
+                                    {
+                                        if due_pill(ui, pal, info, *status, *delayed).clicked() {
+                                            picked = Some((staff.id.clone(), t.id.clone()));
+                                        }
                                     }
                                 }
                             }
@@ -436,7 +560,11 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
         ui.add_space(12.0);
     }
     if !any {
-        empty_state(ui, "No assignments", "Edit this person to assign test systems.");
+        empty_state(
+            ui,
+            "No assignments",
+            "Edit this person to assign test systems.",
+        );
     }
     if picked.is_some() {
         *cx.open_detail = picked;

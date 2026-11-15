@@ -31,16 +31,27 @@ fn name_problems(groups: &[MergeGroup]) -> Vec<Option<&'static str>> {
 }
 
 /// Draws the review. Returns true when every name is usable (Next may proceed).
-pub(super) fn show(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &mut Vec<MergeGroup>) -> bool {
+pub(super) fn show(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    today: NaiveDate,
+    groups: &mut Vec<MergeGroup>,
+) -> bool {
     let problems = name_problems(groups);
     let ok = problems.iter().all(Option::is_none);
-    let (look, single): (Vec<usize>, Vec<usize>) = (0..groups.len()).partition(|&i| needs_look(&groups[i]));
+    let (look, single): (Vec<usize>, Vec<usize>) =
+        (0..groups.len()).partition(|&i| needs_look(&groups[i]));
     let mut split = None;
     if !ok {
         note(ui, pal, "Some names are blank or shared by two people. Fix them (see the yellow notes) before going on.");
         ui.add_space(6.0);
     }
-    ui.label(RichText::new(format!("Needs a look ({})", look.len())).family(medium()).size(15.5).color(pal.text));
+    ui.label(
+        RichText::new(format!("Needs a look ({})", look.len()))
+            .family(medium())
+            .size(15.5)
+            .color(pal.text),
+    );
     ui.add_space(4.0);
     if look.is_empty() {
         ui.label(RichText::new("No name appears on more than one tab.").color(pal.muted));
@@ -52,7 +63,12 @@ pub(super) fn show(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &
     let id = ui.make_persistent_id("import_single_names");
     CollapsingState::load_with_default_open(ui.ctx(), id, false)
         .show_header(ui, |ui| {
-            ui.label(RichText::new(format!("Single names ({})", single.len())).family(medium()).size(15.5).color(pal.text));
+            ui.label(
+                RichText::new(format!("Single names ({})", single.len()))
+                    .family(medium())
+                    .size(15.5)
+                    .color(pal.text),
+            );
         })
         .body(|ui| {
             for &i in &single {
@@ -70,9 +86,13 @@ pub(super) fn show(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &
 }
 
 fn note(ui: &mut egui::Ui, pal: &Palette, text: &str) {
-    Frame::new().fill(pal.yellow_bg).corner_radius(6).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
-        ui.label(RichText::new(text).color(pal.yellow_fg));
-    });
+    Frame::new()
+        .fill(pal.yellow_bg)
+        .corner_radius(6)
+        .inner_margin(Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).color(pal.yellow_fg));
+        });
 }
 
 fn group_card(
@@ -94,9 +114,17 @@ fn group_card(
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 for (sheet, _, raw) in &g.members {
-                    Frame::new().fill(pal.sidebar).corner_radius(255).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-                        ui.label(RichText::new(format!("{sheet} \u{b7} {raw}")).size(12.0).color(pal.muted));
-                    });
+                    Frame::new()
+                        .fill(pal.sidebar)
+                        .corner_radius(255)
+                        .inner_margin(Margin::symmetric(8, 2))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!("{sheet} \u{b7} {raw}"))
+                                    .size(12.0)
+                                    .color(pal.muted),
+                            );
+                        });
                 }
             });
             ui.add_space(4.0);
@@ -128,7 +156,11 @@ fn group_card(
             ui.add_space(4.0);
             let one = g.members.len() < 2;
             let btn = ui.add_enabled(!one, egui::Button::new("Split"));
-            if btn.on_disabled_hover_text("Only one name here").on_hover_text("Treat each name as a different person").clicked() {
+            if btn
+                .on_disabled_hover_text("Only one name here")
+                .on_hover_text("Treat each name as a different person")
+                .clicked()
+            {
                 *split = Some(idx);
             }
         });

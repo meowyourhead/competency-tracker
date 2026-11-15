@@ -26,7 +26,12 @@ pub(crate) enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [SettingsTab::Sections, SettingsTab::Schedule, SettingsTab::General, SettingsTab::Import];
+    const ALL: [SettingsTab; 4] = [
+        SettingsTab::Sections,
+        SettingsTab::Schedule,
+        SettingsTab::General,
+        SettingsTab::Import,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -51,7 +56,10 @@ pub(crate) struct SettingsState {
 
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SettingsState) {
     if let Some(wizard) = &mut state.wizard {
-        if ui.add(Button::new(RichText::new("\u{2190} Settings").color(cx.pal.muted)).frame(false)).clicked() {
+        if ui
+            .add(Button::new(RichText::new("\u{2190} Settings").color(cx.pal.muted)).frame(false))
+            .clicked()
+        {
             state.wizard = None;
             return;
         }
@@ -67,7 +75,9 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SettingsState) {
     tabs(ui, cx.pal, &mut state.tab);
     if !cx.session.is_editing() {
         ui.add_space(4.0);
-        ui.label(RichText::new("You're viewing. Start editing to change settings.").color(cx.pal.muted));
+        ui.label(
+            RichText::new("You're viewing. Start editing to change settings.").color(cx.pal.muted),
+        );
     }
     ui.add_space(14.0);
     match state.tab {
@@ -92,7 +102,10 @@ fn tabs(ui: &mut egui::Ui, pal: &Palette, tab: &mut SettingsTab) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 for t in SettingsTab::ALL {
-                    if ui.add(Button::selectable(*tab == t, t.label()).corner_radius(8)).clicked() {
+                    if ui
+                        .add(Button::selectable(*tab == t, t.label()).corner_radius(8))
+                        .clicked()
+                    {
                         *tab = t;
                     }
                 }
@@ -101,7 +114,12 @@ fn tabs(ui: &mut egui::Ui, pal: &Palette, tab: &mut SettingsTab) {
 }
 
 /// A titled card spanning the page width.
-pub(super) fn card<R>(ui: &mut egui::Ui, pal: &Palette, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub(super) fn card<R>(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    title: &str,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     let inner = Frame::new()
         .fill(pal.card)
         .stroke(Stroke::new(1.0, pal.border))
@@ -109,7 +127,12 @@ pub(super) fn card<R>(ui: &mut egui::Ui, pal: &Palette, title: &str, add: impl F
         .inner_margin(Margin::symmetric(18, 14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(title).family(medium()).size(15.5).color(pal.text));
+            ui.label(
+                RichText::new(title)
+                    .family(medium())
+                    .size(15.5)
+                    .color(pal.text),
+            );
             ui.add_space(6.0);
             add(ui)
         })

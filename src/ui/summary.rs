@@ -1,18 +1,18 @@
-﻿//! Summary (home) page: at a glance, who is due for retraining and on which
+//! Summary (home) page: at a glance, who is due for retraining and on which
 //! tests. Stat cards, filters, and the due list as cards grouped by person or
 //! by test system.
 
 use chrono::NaiveDate;
 use egui::{
-    Align, Button, Color32, CursorIcon, Frame, Label, Layout, Margin, Rect, RichText, Sense, Stroke, UiBuilder,
-    WidgetInfo, WidgetType,
+    Align, Button, Color32, CursorIcon, Frame, Label, Layout, Margin, Rect, RichText, Sense,
+    Stroke, UiBuilder, WidgetInfo, WidgetType,
 };
 
 use crate::dates::fmt_date;
 use crate::model::{Data, Id};
 use crate::query::{
-    counts, distinct_titles, due_items, filter_items, group_by_person, group_by_test, DueFilter, DueItem, Index,
-    StatusFilter,
+    counts, distinct_titles, due_items, filter_items, group_by_person, group_by_test, DueFilter,
+    DueItem, Index, StatusFilter,
 };
 use crate::schedule::DueStatus;
 use crate::session::Session;
@@ -60,7 +60,10 @@ fn centred(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let avail = ui.available_rect_before_wrap();
     let width = avail.width().min(MAX_WIDTH);
     let left = avail.left() + (avail.width() - width) / 2.0;
-    let rect = Rect::from_min_size(egui::pos2(left, avail.top()), egui::vec2(width, avail.height()));
+    let rect = Rect::from_min_size(
+        egui::pos2(left, avail.top()),
+        egui::vec2(width, avail.height()),
+    );
     ui.scope_builder(UiBuilder::new().max_rect(rect), add);
 }
 
@@ -77,11 +80,19 @@ fn page(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
     let session: &Session = cx.session;
     let data = session.data();
     if data.staff.is_empty() {
-        empty_state(ui, "No data yet \u{2014} import your Excel tracker from Settings", "");
+        empty_state(
+            ui,
+            "No data yet \u{2014} import your Excel tracker from Settings",
+            "",
+        );
         return;
     }
     state.refresh(session, cx.today);
-    let SummaryState { filter, group, cache } = state;
+    let SummaryState {
+        filter,
+        group,
+        cache,
+    } = state;
     let all: &[DueItem] = cache.as_ref().map_or(&[], |(_, _, items)| items.as_slice());
     let soon_days = data.settings.due_soon_days;
 
@@ -91,9 +102,15 @@ fn page(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
     ui.add_space(16.0);
 
     let shown = filter_items(all, filter);
-    let any_due = shown.iter().any(|i| matches!(i.status, DueStatus::Overdue | DueStatus::DueSoon));
+    let any_due = shown
+        .iter()
+        .any(|i| matches!(i.status, DueStatus::Overdue | DueStatus::DueSoon));
     if filter.status == StatusFilter::All && !narrowed(filter) && !any_due {
-        empty_state(ui, "Everyone is up to date", &format!("Nothing is overdue or due within {soon_days} days."));
+        empty_state(
+            ui,
+            "Everyone is up to date",
+            &format!("Nothing is overdue or due within {soon_days} days."),
+        );
         return;
     }
     if shown.is_empty() {
@@ -116,17 +133,33 @@ fn text_blank(filter: &DueFilter) -> bool {
 
 /// True when section, test, title or search text narrows the list (status aside).
 fn narrowed(filter: &DueFilter) -> bool {
-    filter.section.is_some() || filter.test.is_some() || filter.title.is_some() || !text_blank(filter)
+    filter.section.is_some()
+        || filter.test.is_some()
+        || filter.title.is_some()
+        || !text_blank(filter)
 }
 
 /// Overdue, due soon, on track, delayed. Counts follow every filter except
 /// status; clicking a card filters by it, clicking it again shows all.
-fn stat_cards(ui: &mut egui::Ui, pal: &Palette, all: &[DueItem], filter: &mut DueFilter, soon_days: i64) {
-    let base = DueFilter { status: StatusFilter::All, ..filter.clone() };
+fn stat_cards(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    all: &[DueItem],
+    filter: &mut DueFilter,
+    soon_days: i64,
+) {
+    let base = DueFilter {
+        status: StatusFilter::All,
+        ..filter.clone()
+    };
     let c = counts(filter_items(all, &base));
     let cards = [
         (StatusFilter::Overdue, "Overdue".to_owned(), c.overdue),
-        (StatusFilter::DueSoon, format!("Due within {soon_days} days"), c.due_soon),
+        (
+            StatusFilter::DueSoon,
+            format!("Due within {soon_days} days"),
+            c.due_soon,
+        ),
         (StatusFilter::OnTrack, "On track".to_owned(), c.on_track),
         (StatusFilter::Delayed, "Delayed".to_owned(), c.delayed),
     ];
@@ -142,16 +175,33 @@ fn stat_cards(ui: &mut egui::Ui, pal: &Palette, all: &[DueItem], filter: &mut Du
 }
 
 /// Search box, then chips (section, test system, title) and the grouping toggle.
-fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, filter: &mut DueFilter, group: &mut Grouping) {
+fn filters(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    data: &Data,
+    filter: &mut DueFilter,
+    group: &mut Grouping,
+) {
     search_box(ui, &mut filter.text, "Search by name, test or section");
     ui.add_space(4.0);
-    let sections: Vec<(Id, String)> =
-        data.sections_sorted().into_iter().filter(|s| !s.retired).map(|s| (s.id.clone(), s.name.clone())).collect();
-    let titles: Vec<(String, String)> = distinct_titles(data).into_iter().map(|t| (t.clone(), t)).collect();
+    let sections: Vec<(Id, String)> = data
+        .sections_sorted()
+        .into_iter()
+        .filter(|s| !s.retired)
+        .map(|s| (s.id.clone(), s.name.clone()))
+        .collect();
+    let titles: Vec<(String, String)> = distinct_titles(data)
+        .into_iter()
+        .map(|t| (t.clone(), t))
+        .collect();
     ui.horizontal(|ui| {
         chip_select(ui, "Section", &mut filter.section, &sections);
         let tests = test_options(data, filter.section.as_deref());
-        if filter.test.as_ref().is_some_and(|t| !tests.iter().any(|(id, _)| id == t)) {
+        if filter
+            .test
+            .as_ref()
+            .is_some_and(|t| !tests.iter().any(|(id, _)| id == t))
+        {
             filter.test = None;
         }
         chip_select(ui, "Test system", &mut filter.test, &tests);
@@ -161,10 +211,16 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, filter: &mut DueFilter
             || filter.title.is_some()
             || !text_blank(filter)
             || filter.status != StatusFilter::All;
-        if any && ui.add(Button::new(RichText::new("Clear filters").color(pal.muted)).frame(false)).clicked() {
+        if any
+            && ui
+                .add(Button::new(RichText::new("Clear filters").color(pal.muted)).frame(false))
+                .clicked()
+        {
             *filter = DueFilter::default();
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| segmented(ui, pal, group));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            segmented(ui, pal, group)
+        });
     });
 }
 
@@ -179,7 +235,11 @@ fn test_options(data: &Data, section: Option<&str>) -> Vec<(Id, String)> {
         let mut tests: Vec<_> = sec.tests.iter().filter(|t| !t.retired).collect();
         tests.sort_by_key(|t| t.order);
         for t in tests {
-            let label = if section.is_some() { t.name.clone() } else { format!("{} \u{b7} {}", t.name, sec.name) };
+            let label = if section.is_some() {
+                t.name.clone()
+            } else {
+                format!("{} \u{b7} {}", t.name, sec.name)
+            };
             out.push((t.id.clone(), label));
         }
     }
@@ -208,7 +268,12 @@ fn segmented(ui: &mut egui::Ui, pal: &Palette, group: &mut Grouping) {
 }
 
 /// One card per group; returns the (staff, test) of a clicked row.
-fn cards(ui: &mut egui::Ui, pal: &Palette, groups: Vec<(Id, Vec<&DueItem>)>, by: Grouping) -> Option<(Id, Id)> {
+fn cards(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    groups: Vec<(Id, Vec<&DueItem>)>,
+    by: Grouping,
+) -> Option<(Id, Id)> {
     let mut picked = None;
     for (_, rows) in groups {
         let first = rows[0];
@@ -232,9 +297,13 @@ fn cards(ui: &mut egui::Ui, pal: &Palette, groups: Vec<(Id, Vec<&DueItem>)>, by:
                 ui.add_space(2.0);
                 for item in rows {
                     let (primary, secondary) = match by {
-                        Grouping::Person => {
-                            (item.test_name.clone(), format!("{} \u{b7} {}", item.section_name, item.info.next_stage_label))
-                        }
+                        Grouping::Person => (
+                            item.test_name.clone(),
+                            format!(
+                                "{} \u{b7} {}",
+                                item.section_name, item.info.next_stage_label
+                            ),
+                        ),
                         Grouping::Test => {
                             let mut s = item.info.next_stage_label.clone();
                             if !item.title.is_empty() {
@@ -255,22 +324,43 @@ fn cards(ui: &mut egui::Ui, pal: &Palette, groups: Vec<(Id, Vec<&DueItem>)>, by:
 
 /// A clickable row: primary text, muted details, and the due pill on the
 /// right. Its accessible name is "staff · test". Returns true when clicked.
-fn due_row(ui: &mut egui::Ui, pal: &Palette, item: &DueItem, primary: &str, secondary: &str) -> bool {
+fn due_row(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    item: &DueItem,
+    primary: &str,
+    secondary: &str,
+) -> bool {
     let mut pill_clicked = false;
-    let builder = UiBuilder::new().id_salt((&item.staff_id, &item.test_id)).sense(Sense::click());
+    let builder = UiBuilder::new()
+        .id_salt((&item.staff_id, &item.test_id))
+        .sense(Sense::click());
     let resp = ui
         .scope_builder(builder, |ui| {
-            let fill = if ui.response().contains_pointer() { pal.sidebar } else { Color32::TRANSPARENT };
-            Frame::new().fill(fill).corner_radius(8).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(Label::new(RichText::new(primary).color(pal.text)).selectable(false));
-                    ui.add(Label::new(RichText::new(secondary).color(pal.muted)).selectable(false));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let delayed = item.delay_note.is_some();
-                        pill_clicked = due_pill(ui, pal, &item.info, item.status, delayed).clicked();
+            let fill = if ui.response().contains_pointer() {
+                pal.sidebar
+            } else {
+                Color32::TRANSPARENT
+            };
+            Frame::new()
+                .fill(fill)
+                .corner_radius(8)
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            Label::new(RichText::new(primary).color(pal.text)).selectable(false),
+                        );
+                        ui.add(
+                            Label::new(RichText::new(secondary).color(pal.muted)).selectable(false),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let delayed = item.delay_note.is_some();
+                            pill_clicked =
+                                due_pill(ui, pal, &item.info, item.status, delayed).clicked();
+                        });
                     });
                 });
-            });
         })
         .response;
     let name = format!("{} \u{b7} {}", item.staff_name, item.test_name);
@@ -294,18 +384,33 @@ mod tests {
     #[test]
     fn due_items_recomputed_only_on_revision_or_date_change() {
         let dir = tempfile::tempdir().unwrap();
-        let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+        let data_dir = DataDir {
+            root: dir.path().join("CompetencyData"),
+        };
         let mut s = Session::open(data_dir, "tester", "pc", 1, now_ts(), Instant::now()).unwrap();
         let today = now_ts().date_naive();
         s.mutate(now_ts(), |d, _| {
-            d.sections[0].tests.push(TestSystem { id: "t-1".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None });
+            d.sections[0].tests.push(TestSystem {
+                id: "t-1".into(),
+                name: "Cobas".into(),
+                order: 0,
+                retired: false,
+                rule_id: None,
+            });
             d.staff.push(Staff {
                 id: "p-1".into(),
                 name: "Agnes".into(),
                 title: "MLT".into(),
                 joined: None,
                 status: StaffStatus::Active,
-                assignments: [("t-1".to_string(), Assignment { state: AssignState::Assigned, since: today })].into(),
+                assignments: [(
+                    "t-1".to_string(),
+                    Assignment {
+                        state: AssignState::Assigned,
+                        since: today,
+                    },
+                )]
+                .into(),
             });
         })
         .unwrap();
@@ -320,8 +425,13 @@ mod tests {
         let second = ptr(&st);
         assert_ne!(second, first, "new date: recomputed");
 
-        s.mutate(now_ts(), |d, _| d.staff[0].name = "Agnes Tan".into()).unwrap();
+        s.mutate(now_ts(), |d, _| d.staff[0].name = "Agnes Tan".into())
+            .unwrap();
         st.refresh(&s, today.succ_opt().unwrap());
-        assert_eq!(st.cache.as_ref().unwrap().2[0].staff_name, "Agnes Tan", "new revision: recomputed");
+        assert_eq!(
+            st.cache.as_ref().unwrap().2[0].staff_name,
+            "Agnes Tan",
+            "new revision: recomputed"
+        );
     }
 }

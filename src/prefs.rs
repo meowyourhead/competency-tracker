@@ -1,4 +1,4 @@
-﻿use std::io;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,11 @@ pub struct Prefs {
 /// `%APPDATA%\CompetencyTracker\prefs.json`.
 pub fn prefs_path() -> Option<PathBuf> {
     let appdata = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(appdata).join("CompetencyTracker").join("prefs.json"))
+    Some(
+        PathBuf::from(appdata)
+            .join("CompetencyTracker")
+            .join("prefs.json"),
+    )
 }
 
 /// Defaults on any error (missing file, bad JSON).
@@ -53,7 +57,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("prefs.json");
-        let saved = Prefs { theme: Theme::Dark, sidebar_collapsed: true };
+        let saved = Prefs {
+            theme: Theme::Dark,
+            sidebar_collapsed: true,
+        };
         save_prefs_to(&path, &saved).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("\"dark\""));
         let back = load_prefs_from(&path);
@@ -64,7 +71,10 @@ mod tests {
     #[test]
     fn load_prefs_defaults_on_missing_or_bad_file() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load_prefs_from(&dir.path().join("none.json")).theme, Theme::Light);
+        assert_eq!(
+            load_prefs_from(&dir.path().join("none.json")).theme,
+            Theme::Light
+        );
         let bad = dir.path().join("bad.json");
         std::fs::write(&bad, "{not json").unwrap();
         let p = load_prefs_from(&bad);

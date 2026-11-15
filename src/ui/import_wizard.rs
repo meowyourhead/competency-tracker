@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use egui::{Button, Frame, Margin, RichText, Stroke};
 
 use crate::import::excel::{read_workbook, RawSheet};
-use crate::import::mapping::{build_import, carry_over, propose_merges, ImportOptions, ImportPlan, MergeGroup};
+use crate::import::mapping::{
+    build_import, carry_over, propose_merges, ImportOptions, ImportPlan, MergeGroup,
+};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::import_review;
 use crate::ui::theme::{heading, medium, Palette};
@@ -95,13 +97,19 @@ impl ImportWizard {
         // `Ok` means replaced: a failed save is retried by the session and
         // shown on the Done step, so the import is never run twice.
         if let Err(e) = cx.session.replace_data(cx.now, data) {
-            self.error = Some(if cx.session.is_editing() { e } else { "Editing ended, so nothing was imported.".to_owned() });
+            self.error = Some(if cx.session.is_editing() {
+                e
+            } else {
+                "Editing ended, so nothing was imported.".to_owned()
+            });
             return;
         }
         let path = cx.session.data_dir().import_report();
         match std::fs::write(&path, report.to_text()) {
             Ok(()) => self.report_path = Some(path),
-            Err(e) => cx.toasts.push(Toast::new(format!("Couldn't write the import report: {e}"))),
+            Err(e) => cx
+                .toasts
+                .push(Toast::new(format!("Couldn't write the import report: {e}"))),
         }
         self.done = Some((report.staff, report.records, report.unconfirmed));
         self.warnings = report.warnings;
@@ -180,15 +188,26 @@ fn pick_file(ui: &mut egui::Ui, pal: &Palette, w: &mut ImportWizard) {
         ui.label(RichText::new("Choose the lab's Excel tracker (.xlsm or .xlsx). The file is only read, never changed.").color(pal.muted));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(w.reading.is_none(), Button::new("Choose Excel file\u{2026}")).clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Excel", &["xlsm", "xlsx"]).pick_file() {
+            if ui
+                .add_enabled(
+                    w.reading.is_none(),
+                    Button::new("Choose Excel file\u{2026}"),
+                )
+                .clicked()
+            {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Excel", &["xlsm", "xlsx"])
+                    .pick_file()
+                {
                     w.reading = Some((p, false));
                     w.error = None;
                     ui.ctx().request_repaint();
                 }
             }
             if let Some((p, _)) = &w.reading {
-                ui.label(RichText::new(format!("Reading\u{2026} {}", p.display())).color(pal.muted));
+                ui.label(
+                    RichText::new(format!("Reading\u{2026} {}", p.display())).color(pal.muted),
+                );
             } else if let Some(p) = &w.path {
                 ui.label(RichText::new(p.display().to_string()).color(pal.text));
             }
@@ -244,20 +263,36 @@ fn preview(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) {
         ui.add_space(10.0);
     }
     card(ui, pal, |ui| {
-        ui.label(RichText::new("What will be imported").family(medium()).size(15.5).color(pal.text));
+        ui.label(
+            RichText::new("What will be imported")
+                .family(medium())
+                .size(15.5)
+                .color(pal.text),
+        );
         ui.add_space(6.0);
-        egui::Grid::new("import_counts").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
-            count_row(ui, pal, "Staff", r.staff);
-            count_row(ui, pal, "Records", r.records);
-            count_row(ui, pal, "Unconfirmed records", r.unconfirmed);
-            count_row(ui, pal, "Planned dates", r.planned);
-            count_row(ui, pal, "Notes", r.notes);
-            count_row(ui, pal, "Excel due dates used", r.excel_overrides.len());
-            count_row(ui, pal, "Excel due dates ignored", r.excel_ignored_planned.len() + r.excel_ignored_years.len());
-            count_row(ui, pal, "Annual numbering to check", r.flagged_stage.len());
-        });
+        egui::Grid::new("import_counts")
+            .num_columns(2)
+            .spacing([24.0, 6.0])
+            .show(ui, |ui| {
+                count_row(ui, pal, "Staff", r.staff);
+                count_row(ui, pal, "Records", r.records);
+                count_row(ui, pal, "Unconfirmed records", r.unconfirmed);
+                count_row(ui, pal, "Planned dates", r.planned);
+                count_row(ui, pal, "Notes", r.notes);
+                count_row(ui, pal, "Excel due dates used", r.excel_overrides.len());
+                count_row(
+                    ui,
+                    pal,
+                    "Excel due dates ignored",
+                    r.excel_ignored_planned.len() + r.excel_ignored_years.len(),
+                );
+                count_row(ui, pal, "Annual numbering to check", r.flagged_stage.len());
+            });
         ui.add_space(6.0);
-        ui.label(RichText::new("The full list is saved as import-report.txt in the data folder.").color(pal.muted));
+        ui.label(
+            RichText::new("The full list is saved as import-report.txt in the data folder.")
+                .color(pal.muted),
+        );
         error_line(ui, pal, &w.error);
     });
     let editing = cx.session.is_editing();
@@ -281,10 +316,18 @@ fn done(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) -> bool {
     let (staff, records, unconfirmed) = w.done.unwrap_or_default();
     let mut review = false;
     card(ui, pal, |ui| {
-        ui.label(RichText::new(format!("Imported {staff} staff and {records} records.")).family(medium()).size(15.5).color(pal.text));
+        ui.label(
+            RichText::new(format!("Imported {staff} staff and {records} records."))
+                .family(medium())
+                .size(15.5)
+                .color(pal.text),
+        );
         ui.add_space(6.0);
         if cx.session.save_error().is_some() {
-            ui.label(RichText::new("Imported, but not saved yet \u{2014} the app keeps retrying").color(pal.yellow_fg));
+            ui.label(
+                RichText::new("Imported, but not saved yet \u{2014} the app keeps retrying")
+                    .color(pal.yellow_fg),
+            );
         }
         for warning in &w.warnings {
             ui.label(RichText::new(warning).color(pal.yellow_fg));
@@ -293,14 +336,20 @@ fn done(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) -> bool {
             ui.label(RichText::new("The import report could not be saved.").color(pal.yellow_fg));
         }
         ui.horizontal(|ui| {
-            if ui.add_enabled(w.report_path.is_some(), Button::new("Open report")).clicked() {
+            if ui
+                .add_enabled(w.report_path.is_some(), Button::new("Open report"))
+                .clicked()
+            {
                 if let Some(p) = &w.report_path {
                     if let Err(e) = std::process::Command::new("notepad.exe").arg(p).spawn() {
-                        cx.toasts.push(Toast::new(format!("Couldn't open the report: {e}")));
+                        cx.toasts
+                            .push(Toast::new(format!("Couldn't open the report: {e}")));
                     }
                 }
             }
-            review = ui.button(format!("Review unconfirmed ({unconfirmed})")).clicked();
+            review = ui
+                .button(format!("Review unconfirmed ({unconfirmed})"))
+                .clicked();
         });
     });
     review
@@ -336,23 +385,43 @@ mod tests {
     }
 
     fn sheet(name: &str, person: &str, title: &str) -> RawSheet {
-        let empty = || vec![StageCell { cell: Cell::Empty, ticked: false }];
+        let empty = || {
+            vec![StageCell {
+                cell: Cell::Empty,
+                ticked: false,
+            }]
+        };
         RawSheet {
             name: name.into(),
-            tests: vec![RawTest { col: 5, header: "Test A".into(), tick_col: Some(6), section_hint: name.into() }],
+            tests: vec![RawTest {
+                col: 5,
+                header: "Test A".into(),
+                tick_col: Some(6),
+                section_hint: name.into(),
+            }],
             blocks: vec![RawBlock {
                 row: 4,
                 name: person.into(),
                 title: title.into(),
                 joined: Some(ymd(2020, 1, 1)),
-                stages: [vec![StageCell { cell: Cell::Date(ymd(2025, 1, 10)), ticked: true }], empty(), empty(), empty()],
+                stages: [
+                    vec![StageCell {
+                        cell: Cell::Date(ymd(2025, 1, 10)),
+                        ticked: true,
+                    }],
+                    empty(),
+                    empty(),
+                    empty(),
+                ],
                 remarks: vec![],
             }],
         }
     }
 
     fn harness(dir: &tempfile::TempDir) -> Harness<'static, St> {
-        let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+        let data_dir = DataDir {
+            root: dir.path().join("CompetencyData"),
+        };
         let session = Session::open(data_dir, "tester", "pc", 1, now_ts(), Instant::now()).unwrap();
         let st = St {
             session,
@@ -363,30 +432,32 @@ mod tests {
             review: false,
             styled: false,
         };
-        let mut h = Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
-            |ui, st: &mut St| {
-                if !st.styled {
-                    // New fonts only take effect from the next pass.
-                    theme::install_fonts(ui.ctx());
-                    st.styled = true;
-                    ui.ctx().request_repaint();
-                    return;
-                }
-                let now = now_ts();
-                let mut cx = Ctx {
-                    session: &mut st.session,
-                    pal: &st.pal,
-                    today: now.date_naive(),
-                    now,
-                    toasts: &mut st.toasts,
-                    open_detail: &mut st.open,
-                };
-                if show(ui, &mut cx, &mut st.wizard) {
-                    st.review = true;
-                }
-            },
-            st,
-        );
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .build_ui_state(
+                |ui, st: &mut St| {
+                    if !st.styled {
+                        // New fonts only take effect from the next pass.
+                        theme::install_fonts(ui.ctx());
+                        st.styled = true;
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+                    let now = now_ts();
+                    let mut cx = Ctx {
+                        session: &mut st.session,
+                        pal: &st.pal,
+                        today: now.date_naive(),
+                        now,
+                        toasts: &mut st.toasts,
+                        open_detail: &mut st.open,
+                    };
+                    if show(ui, &mut cx, &mut st.wizard) {
+                        st.review = true;
+                    }
+                },
+                st,
+            );
         h.run();
         h
     }
@@ -399,7 +470,10 @@ mod tests {
     fn wizard_preview_and_import_from_raw() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT"), sheet("Serology", "xin  yi", "Senior MT")]);
+        h.state_mut().wizard.load_sheets(vec![
+            sheet("Hematology", "Xin Yi", "MT"),
+            sheet("Serology", "xin  yi", "Senior MT"),
+        ]);
         h.run();
         assert_eq!(h.state().wizard.step, WizardStep::ReviewMerges);
         h.get_by_label("Needs a look (1)");
@@ -414,7 +488,9 @@ mod tests {
         assert_eq!(data.staff.len(), 1, "both tabs are one person");
         assert_eq!(data.staff[0].name, "Xin Yi");
         assert!(!data.records.is_empty());
-        let report = std::fs::read_to_string(dir.path().join("CompetencyData").join("import-report.txt")).unwrap();
+        let report =
+            std::fs::read_to_string(dir.path().join("CompetencyData").join("import-report.txt"))
+                .unwrap();
         assert!(report.starts_with("Excel import report"));
         h.get_by_label_contains("Imported 1 staff and");
         button(&h, "Review unconfirmed (0)").click();
@@ -428,21 +504,33 @@ mod tests {
         let mut h = harness(&dir);
         // Today's snapshot cannot be written: a folder is in its place.
         let name = crate::snapshot::snapshot_file_name(now_ts().date_naive(), "tester");
-        let target = dir.path().join("CompetencyData").join("snapshots").join(name);
+        let target = dir
+            .path()
+            .join("CompetencyData")
+            .join("snapshots")
+            .join(name);
         std::fs::create_dir_all(&target).unwrap();
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.state_mut()
+            .wizard
+            .load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
         h.run();
         import_now(&mut h);
         assert!(h.state().wizard.error.is_none());
         assert_eq!(h.state().session.data().staff.len(), 1);
         assert!(h.state().session.save_error().is_some());
         h.get_by_label("Imported, but not saved yet \u{2014} the app keeps retrying");
-        assert!(dir.path().join("CompetencyData").join("import-report.txt").exists());
+        assert!(dir
+            .path()
+            .join("CompetencyData")
+            .join("import-report.txt")
+            .exists());
         // Once the save goes through, the note goes away.
         std::fs::remove_dir(&target).unwrap();
         h.state_mut().session.save_now(now_ts()).unwrap();
         h.run();
-        assert!(h.query_by_label("Imported, but not saved yet \u{2014} the app keeps retrying").is_none());
+        assert!(h
+            .query_by_label("Imported, but not saved yet \u{2014} the app keeps retrying")
+            .is_none());
     }
 
     #[test]
@@ -450,7 +538,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
         h.state_mut().session.stop_editing(now_ts()).unwrap();
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.state_mut()
+            .wizard
+            .load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
         h.run();
         button(&h, "Next").click();
         h.run();
@@ -471,7 +561,10 @@ mod tests {
     fn edited_name_title_and_joined_reach_the_data() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT"), sheet("Serology", "Xin Yi", "MT")]);
+        h.state_mut().wizard.load_sheets(vec![
+            sheet("Hematology", "Xin Yi", "MT"),
+            sheet("Serology", "Xin Yi", "MT"),
+        ]);
         h.run();
         let g = &mut h.state_mut().wizard.groups[0];
         g.name = "Xin Yi Lim".into();
@@ -480,14 +573,20 @@ mod tests {
         h.run();
         import_now(&mut h);
         let s = &h.state().session.data().staff[0];
-        assert_eq!((s.name.as_str(), s.title.as_str(), s.joined), ("Xin Yi Lim", "SMT", Some(ymd(2019, 5, 6))));
+        assert_eq!(
+            (s.name.as_str(), s.title.as_str(), s.joined),
+            ("Xin Yi Lim", "SMT", Some(ymd(2019, 5, 6)))
+        );
     }
 
     #[test]
     fn split_then_import_yields_two_staff() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT"), sheet("Serology", "Xin Yi", "MT")]);
+        h.state_mut().wizard.load_sheets(vec![
+            sheet("Hematology", "Xin Yi", "MT"),
+            sheet("Serology", "Xin Yi", "MT"),
+        ]);
         h.run();
         button(&h, "Split").click();
         h.run();
@@ -504,11 +603,20 @@ mod tests {
     fn split_of_differently_named_members_leaves_next_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Shawn (Weixiang)", "MT"), sheet("Serology", " Weixiang ", "MT")]);
+        h.state_mut().wizard.load_sheets(vec![
+            sheet("Hematology", "Shawn (Weixiang)", "MT"),
+            sheet("Serology", " Weixiang ", "MT"),
+        ]);
         h.run();
         button(&h, "Split").click();
         h.run();
-        let names: Vec<&str> = h.state().wizard.groups.iter().map(|g| g.name.as_str()).collect();
+        let names: Vec<&str> = h
+            .state()
+            .wizard
+            .groups
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect();
         assert_eq!(names, ["Shawn (Weixiang)", "Weixiang"]);
         assert!(!button(&h, "Next").accesskit_node().is_disabled());
         import_now(&mut h);
@@ -519,7 +627,9 @@ mod tests {
     fn blank_name_disables_next() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.state_mut()
+            .wizard
+            .load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
         h.run();
         assert!(!button(&h, "Next").accesskit_node().is_disabled());
         h.state_mut().wizard.groups[0].name = "  ".into();
@@ -531,14 +641,21 @@ mod tests {
     fn reimport_keeps_settings_audit_and_a_backup() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
-        h.state_mut().session.mutate(now_ts(), |d, _| d.settings.due_soon_days = 45).unwrap();
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.state_mut()
+            .session
+            .mutate(now_ts(), |d, _| d.settings.due_soon_days = 45)
+            .unwrap();
+        h.state_mut()
+            .wizard
+            .load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
         h.run();
         import_now(&mut h);
         let first = h.state().session.data().audit.len();
         // A second import over the first, the same day.
         h.state_mut().wizard = ImportWizard::default();
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Bea", "MT")]);
+        h.state_mut()
+            .wizard
+            .load_sheets(vec![sheet("Hematology", "Bea", "MT")]);
         h.run();
         button(&h, "Next").click();
         h.run();
@@ -548,17 +665,32 @@ mod tests {
         assert_eq!(h.state().wizard.step, WizardStep::Done);
         let data = h.state().session.data();
         assert_eq!(data.settings.due_soon_days, 45);
-        assert_eq!(data.audit.len(), first + 1, "history kept, one new import entry");
+        assert_eq!(
+            data.audit.len(),
+            first + 1,
+            "history kept, one new import entry"
+        );
         assert_eq!(data.staff[0].name, "Bea");
-        let archive = dir.path().join("CompetencyData").join("snapshots").join("archive");
-        assert_eq!(std::fs::read_dir(archive).unwrap().count(), 1, "the first import was backed up");
+        let archive = dir
+            .path()
+            .join("CompetencyData")
+            .join("snapshots")
+            .join("archive");
+        assert_eq!(
+            std::fs::read_dir(archive).unwrap().count(),
+            1,
+            "the first import was backed up"
+        );
     }
 
     #[test]
     fn split_makes_each_member_its_own_group() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
-        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT"), sheet("Serology", "Xin Yi", "MT")]);
+        h.state_mut().wizard.load_sheets(vec![
+            sheet("Hematology", "Xin Yi", "MT"),
+            sheet("Serology", "Xin Yi", "MT"),
+        ]);
         h.run();
         h.get_by_label("Needs a look (1)");
         button(&h, "Split").click();

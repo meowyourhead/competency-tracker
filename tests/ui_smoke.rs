@@ -1,4 +1,4 @@
-﻿//! Smoke tests for the app shell, driven headlessly with egui_kittest.
+//! Smoke tests for the app shell, driven headlessly with egui_kittest.
 
 use std::time::Instant;
 
@@ -18,7 +18,9 @@ fn harness(app: TrackerApp) -> Harness<'static, TrackerApp> {
 }
 
 fn session(dir: &tempfile::TempDir, pid: u32) -> Session {
-    let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+    let data_dir = DataDir {
+        root: dir.path().join("CompetencyData"),
+    };
     Session::open(data_dir, "tester", "pc", pid, now_ts(), Instant::now()).unwrap()
 }
 
@@ -37,7 +39,9 @@ fn viewer_banner_when_lock_held() {
     let dir = tempfile::tempdir().unwrap();
     // Another process (pid 999) takes the edit lock first.
     let other = {
-        let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+        let data_dir = DataDir {
+            root: dir.path().join("CompetencyData"),
+        };
         Session::open(data_dir, "agnes", "pc2", 999, now_ts(), Instant::now()).unwrap()
     };
     assert!(other.is_editing());
@@ -50,22 +54,33 @@ fn failed_save_on_close_cancels_and_offers_retry() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(&dir, 1);
     assert!(s.is_editing());
-    s.mutate(now_ts(), |d, _| d.settings.due_soon_days = 45).unwrap();
+    s.mutate(now_ts(), |d, _| d.settings.due_soon_days = 45)
+        .unwrap();
     let mut h = harness(TrackerApp::new_for_test(s));
     // Make saving impossible: replace the snapshots folder with a file.
     let snaps = dir.path().join("CompetencyData").join("snapshots");
     std::fs::remove_dir_all(&snaps).unwrap();
     std::fs::write(&snaps, b"not a folder").unwrap();
 
-    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    h.input_mut()
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .events
+        .push(egui::ViewportEvent::Close);
     h.step();
     let commands = &h.output().viewport_output[&egui::ViewportId::ROOT].commands;
-    assert!(commands.iter().any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+    assert!(commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
     h.run();
     h.get_by_label_contains("Couldn't save your changes:");
     h.get_by_label("Retry");
     h.get_by_label("Quit anyway");
-    assert!(h.state().session().is_editing(), "edits and lock are kept until the user decides");
+    assert!(
+        h.state().session().is_editing(),
+        "edits and lock are kept until the user decides"
+    );
 }
 
 #[test]
@@ -79,39 +94,60 @@ fn failed_save_on_close_with_nothing_unsaved_just_closes() {
     std::fs::write(&snaps, b"not a folder").unwrap();
 
     close_window(&mut h);
-    assert!(!root_commands(&h).iter().any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+    assert!(!root_commands(&h)
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
     assert!(!h.state().session().is_editing());
-    assert!(!dir.path().join("CompetencyData").join("edit.lock").exists(), "lock released");
+    assert!(
+        !dir.path().join("CompetencyData").join("edit.lock").exists(),
+        "lock released"
+    );
 }
 
 fn close_window(h: &mut Harness<'static, TrackerApp>) {
-    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    h.input_mut()
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .events
+        .push(egui::ViewportEvent::Close);
     h.step();
 }
 
 fn root_commands(h: &Harness<'static, TrackerApp>) -> Vec<egui::ViewportCommand> {
-    h.output().viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
+    h.output()
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .map(|v| v.commands.clone())
+        .unwrap_or_default()
 }
 
 #[test]
 fn close_after_lock_lost_shows_conflict_then_closes() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(&dir, 1);
-    s.mutate(now_ts(), |d, _| d.settings.due_soon_days = 45).unwrap();
+    s.mutate(now_ts(), |d, _| d.settings.due_soon_days = 45)
+        .unwrap();
     // Another process takes over the lock while our edits are unsaved.
-    let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+    let data_dir = DataDir {
+        root: dir.path().join("CompetencyData"),
+    };
     std::fs::remove_file(data_dir.lock_path()).unwrap();
     let other = Session::open(data_dir, "agnes", "pc2", 999, now_ts(), Instant::now()).unwrap();
     assert!(other.is_editing());
 
     let mut h = harness(TrackerApp::new_for_test(s));
     close_window(&mut h);
-    assert!(root_commands(&h).iter().any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+    assert!(root_commands(&h)
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
     h.run();
     h.get_by_label_contains("Someone else took over editing. Your changes were saved to");
     h.get_by_label("Close").click();
     h.step();
-    assert!(root_commands(&h).iter().any(|c| matches!(c, egui::ViewportCommand::Close)));
+    assert!(root_commands(&h)
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Close)));
 }
 
 #[test]
@@ -133,7 +169,14 @@ fn staff(id: &str, name: &str, title: &str, test_id: &str) -> Staff {
         title: title.into(),
         joined: None,
         status: StaffStatus::Active,
-        assignments: [(test_id.to_string(), Assignment { state: AssignState::Assigned, since })].into(),
+        assignments: [(
+            test_id.to_string(),
+            Assignment {
+                state: AssignState::Assigned,
+                since,
+            },
+        )]
+        .into(),
     }
 }
 
@@ -158,11 +201,19 @@ fn initial(staff_id: &str, test_id: &str, days_ago: u64) -> Record {
 fn seeded(dir: &tempfile::TempDir, agnes_days_ago: u64) -> Harness<'static, TrackerApp> {
     let mut s = session(dir, 1);
     s.mutate(now_ts(), |d, _| {
-        let test = |id: &str, name: &str, order| TestSystem { id: id.into(), name: name.into(), order, retired: false, rule_id: None };
+        let test = |id: &str, name: &str, order| TestSystem {
+            id: id.into(),
+            name: name.into(),
+            order,
+            retired: false,
+            rule_id: None,
+        };
         d.sections[0].tests = vec![test("t-cobas", "Cobas", 0), test("t-arch", "Architect", 1)];
         d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
-        d.staff.push(staff("p-bram", "Bram", "Senior MLT", "t-arch"));
-        d.records.push(initial("p-agnes", "t-cobas", agnes_days_ago));
+        d.staff
+            .push(staff("p-bram", "Bram", "Senior MLT", "t-arch"));
+        d.records
+            .push(initial("p-agnes", "t-cobas", agnes_days_ago));
         d.records.push(initial("p-bram", "t-arch", 30));
     })
     .unwrap();
@@ -189,11 +240,17 @@ fn summary_stat_card_filters_and_toggles_back() {
     assert!(h.query_by_label("Bram").is_some());
     h.get_by_label("Overdue 1").click();
     h.run();
-    assert!(h.query_by_label("Bram").is_none(), "only overdue rows are listed");
+    assert!(
+        h.query_by_label("Bram").is_none(),
+        "only overdue rows are listed"
+    );
     assert!(h.query_by_label("Agnes").is_some());
     h.get_by_label("Overdue 1").click();
     h.run();
-    assert!(h.query_by_label("Bram").is_some(), "a second click resets to all");
+    assert!(
+        h.query_by_label("Bram").is_some(),
+        "a second click resets to all"
+    );
 }
 
 #[test]
@@ -239,14 +296,24 @@ fn fonts_register_serif_and_medium_and_headings_render() {
     // Fonts installed on the first pass take effect on the next one.
     h.run();
     h.step();
-    let families: Vec<egui::FontFamily> = h.ctx.fonts(|f| f.definitions().families.keys().cloned().collect());
+    let families: Vec<egui::FontFamily> = h
+        .ctx
+        .fonts(|f| f.definitions().families.keys().cloned().collect());
     for name in ["serif", "serif-regular", "medium"] {
-        assert!(families.contains(&egui::FontFamily::Name(name.into())), "missing family {name}");
+        assert!(
+            families.contains(&egui::FontFamily::Name(name.into())),
+            "missing family {name}"
+        );
     }
-    let regular = h.ctx.fonts(|f| f.definitions().families[&egui::FontFamily::Proportional][0].clone());
+    let regular = h
+        .ctx
+        .fonts(|f| f.definitions().families[&egui::FontFamily::Proportional][0].clone());
     assert_eq!(regular, "Inter-Regular");
     // The Summary page title is a serif heading and must render without panicking.
-    assert!(h.query_all_by_label("Summary").count() >= 2, "sidebar entry and serif page title");
+    assert!(
+        h.query_all_by_label("Summary").count() >= 2,
+        "sidebar entry and serif page title"
+    );
 }
 
 #[test]
@@ -258,7 +325,10 @@ fn summary_search_narrowing_on_track_person_lists_row() {
     h.run();
     summary_search(&h).type_text("Agnes");
     h.run();
-    assert!(h.query_by_label("Everyone is up to date").is_none(), "a narrowing filter lists rows instead");
+    assert!(
+        h.query_by_label("Everyone is up to date").is_none(),
+        "a narrowing filter lists rows instead"
+    );
     h.get_by_label("Agnes");
     assert!(h.query_by_label("Bram").is_none());
 }
@@ -285,7 +355,8 @@ fn summary_no_data_state_reads_full_sentence() {
 
 /// Goes to Sections (Chemistry is first) and clicks the grid cell named `cell`.
 fn open_cell(h: &mut Harness<'static, TrackerApp>, cell: &str) {
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sections").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sections")
+        .click();
     h.run();
     h.get_by_label(cell).click();
     h.run();
@@ -295,13 +366,18 @@ fn open_cell(h: &mut Harness<'static, TrackerApp>, cell: &str) {
 fn grid_shows_pill_and_opens_detail() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sections").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Sections")
+        .click();
     h.run();
     let done = now_ts().date_naive() - chrono::Days::new(365);
     let due = fmt_date(done.checked_add_months(chrono::Months::new(6)).unwrap());
     h.get_by_label(&due);
     // Both people's next stage is Semi-annual: one label under each pill.
-    assert_eq!(h.query_all_by_label("Semi-annual").count(), 2, "stage label under the pill");
+    assert_eq!(
+        h.query_all_by_label("Semi-annual").count(),
+        2,
+        "stage label under the pill"
+    );
     assert!(h.query_by_label("Bram \u{b7} Architect").is_some());
     assert!(h.query_by_label("Close panel").is_none());
     h.get_by_label("Agnes \u{b7} Cobas").click();
@@ -313,13 +389,32 @@ fn grid_shows_pill_and_opens_detail() {
 /// Agnes has six Cobas completions, one stage a year apart.
 fn six_completions(dir: &tempfile::TempDir) -> (Harness<'static, TrackerApp>, Vec<String>) {
     let mut s = session(dir, 1);
-    let labels = ["Initial", "Semi-annual", "1st Annual", "2nd Annual", "3rd Annual", "4th Annual"];
+    let labels = [
+        "Initial",
+        "Semi-annual",
+        "1st Annual",
+        "2nd Annual",
+        "3rd Annual",
+        "4th Annual",
+    ];
     let today = now_ts().date_naive();
     let lines: Vec<String> = (0..6u64)
-        .map(|i| format!("{} \u{b7} {}", labels[i as usize], fmt_date(today - chrono::Days::new(2200 - i * 365))))
+        .map(|i| {
+            format!(
+                "{} \u{b7} {}",
+                labels[i as usize],
+                fmt_date(today - chrono::Days::new(2200 - i * 365))
+            )
+        })
         .collect();
     s.mutate(now_ts(), |d, _| {
-        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        d.sections[0].tests = vec![TestSystem {
+            id: "t-cobas".into(),
+            name: "Cobas".into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        }];
         d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
         for i in 0..6u64 {
             let mut r = initial("p-agnes", "t-cobas", 2200 - i * 365);
@@ -344,7 +439,10 @@ fn detail_shows_four_then_more() {
         h.get_by_label(line);
     }
     for line in &lines[..2] {
-        assert!(h.query_by_label(line).is_none(), "{line} is hidden at first");
+        assert!(
+            h.query_by_label(line).is_none(),
+            "{line} is hidden at first"
+        );
     }
     h.get_by_label("Show 2 older entries").click();
     h.run();
@@ -359,7 +457,13 @@ fn mark_complete_disabled_when_viewing() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(&dir, 1);
     s.mutate(now_ts(), |d, _| {
-        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        d.sections[0].tests = vec![TestSystem {
+            id: "t-cobas".into(),
+            name: "Cobas".into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        }];
         d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
     })
     .unwrap();
@@ -378,19 +482,30 @@ fn mark_complete_adds_record() {
     let mut h = seeded(&dir, 365);
     open_cell(&mut h, "Agnes \u{b7} Cobas");
     let before = h.state().session().data().records.len();
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Mark complete").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Mark complete")
+        .click();
     h.run();
-    let comment = h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).next().expect("comment box");
+    let comment = h
+        .query_all_by_role(egui::accesskit::Role::MultilineTextInput)
+        .next()
+        .expect("comment box");
     comment.click();
     h.run();
-    h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).next().unwrap().type_text("Bench 2");
+    h.query_all_by_role(egui::accesskit::Role::MultilineTextInput)
+        .next()
+        .unwrap()
+        .type_text("Bench 2");
     h.run();
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save")
+        .click();
     h.run();
     let records = &h.state().session().data().records;
     assert_eq!(records.len(), before + 1);
     let added = records.last().unwrap();
-    assert_eq!((added.by.as_str(), added.stage_index, added.comment.as_str()), ("tester", 1, "Bench 2"));
+    assert_eq!(
+        (added.by.as_str(), added.stage_index, added.comment.as_str()),
+        ("tester", 1, "Bench 2")
+    );
     assert_eq!(added.completed_on, now_ts().date_naive());
 }
 
@@ -399,7 +514,8 @@ fn button<'a>(h: &'a Harness<'static, TrackerApp>, label: &'a str) -> egui_kitte
 }
 
 fn has_button(h: &Harness<'static, TrackerApp>, label: &str) -> bool {
-    h.query_by_role_and_label(egui::accesskit::Role::Button, label).is_some()
+    h.query_by_role_and_label(egui::accesskit::Role::Button, label)
+        .is_some()
 }
 
 #[test]
@@ -414,7 +530,15 @@ fn mark_na_closes_open_form() {
     h.run();
     button(&h, "Mark N/A").click();
     h.run();
-    let agnes = h.state().session().data().staff.iter().find(|s| s.id == "p-agnes").unwrap().clone();
+    let agnes = h
+        .state()
+        .session()
+        .data()
+        .staff
+        .iter()
+        .find(|s| s.id == "p-agnes")
+        .unwrap()
+        .clone();
     assert_eq!(agnes.assignments["t-cobas"].state, AssignState::Na);
     assert!(!has_button(&h, "Save"), "the Mark complete form is gone");
 }
@@ -440,7 +564,10 @@ fn skip_stage_asks_first() {
     open_cell(&mut h, "Agnes \u{b7} Cobas");
     button(&h, "Skip stage").click();
     h.run();
-    assert!(h.state().session().data().skipped.is_empty(), "nothing happens before confirming");
+    assert!(
+        h.state().session().data().skipped.is_empty(),
+        "nothing happens before confirming"
+    );
     h.get_by_label("Skip Semi-annual?");
     button(&h, "Skip").click();
     h.run();
@@ -456,7 +583,10 @@ fn clear_due_date_needs_an_override() {
     open_cell(&mut h, "Agnes \u{b7} Cobas");
     button(&h, "Set due date").click();
     h.run();
-    assert!(button(&h, "Clear").accesskit_node().is_disabled(), "rule-based due date: nothing to clear");
+    assert!(
+        button(&h, "Clear").accesskit_node().is_disabled(),
+        "rule-based due date: nothing to clear"
+    );
     button(&h, "Set").click();
     h.run();
     assert_eq!(h.state().session().data().due_overrides.len(), 1);
@@ -475,7 +605,10 @@ fn escape_with_menu_open_keeps_panel() {
     assert!(has_button(&h, "Mark N/A"));
     h.key_press(egui::Key::Escape);
     h.run();
-    assert!(h.query_by_label("Close panel").is_some(), "Esc closed the menu, not the panel");
+    assert!(
+        h.query_by_label("Close panel").is_some(),
+        "Esc closed the menu, not the panel"
+    );
     h.key_press(egui::Key::Escape);
     h.run();
     assert!(h.query_by_label("Close panel").is_none());
@@ -501,7 +634,13 @@ fn picking_a_section_draws_its_grid_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(&dir, 1);
     s.mutate(now_ts(), |d, _| {
-        d.sections[1].tests = vec![TestSystem { id: "t-ruby".into(), name: "Ruby".into(), order: 0, retired: false, rule_id: None }];
+        d.sections[1].tests = vec![TestSystem {
+            id: "t-ruby".into(),
+            name: "Ruby".into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        }];
         d.staff.push(staff("p-cara", "Cara", "MLT", "t-ruby"));
     })
     .unwrap();
@@ -511,7 +650,10 @@ fn picking_a_section_draws_its_grid_at_once() {
     h.run();
     button(&h, "Haematology").click();
     h.step();
-    assert!(h.query_by_label("Cara \u{b7} Ruby").is_some(), "grid drawn in the same frame");
+    assert!(
+        h.query_by_label("Cara \u{b7} Ruby").is_some(),
+        "grid drawn in the same frame"
+    );
 }
 
 #[test]
@@ -519,9 +661,20 @@ fn wheel_over_names_scrolls_grid() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(&dir, 1);
     s.mutate(now_ts(), |d, _| {
-        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        d.sections[0].tests = vec![TestSystem {
+            id: "t-cobas".into(),
+            name: "Cobas".into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        }];
         for i in 0..40 {
-            d.staff.push(staff(&format!("p-{i:02}"), &format!("P{i:02}"), "MLT", "t-cobas"));
+            d.staff.push(staff(
+                &format!("p-{i:02}"),
+                &format!("P{i:02}"),
+                "MLT",
+                "t-cobas",
+            ));
         }
     })
     .unwrap();
@@ -529,7 +682,10 @@ fn wheel_over_names_scrolls_grid() {
     h.run();
     button(&h, "Sections").click();
     h.run();
-    assert!(h.query_by_label("P39 \u{b7} Cobas").is_none(), "last row starts out of view");
+    assert!(
+        h.query_by_label("P39 \u{b7} Cobas").is_none(),
+        "last row starts out of view"
+    );
     let first = h.get_by_label("P00 \u{b7} Cobas").rect();
     let over_names = egui::pos2(first.left() - 80.0, first.center().y);
     for _ in 0..6 {
@@ -543,7 +699,10 @@ fn wheel_over_names_scrolls_grid() {
         // Smooth scrolling keeps repainting for a few frames.
         h.run_steps(10);
     }
-    assert!(h.query_by_label("P39 \u{b7} Cobas").is_some(), "the grid scrolled to the bottom");
+    assert!(
+        h.query_by_label("P39 \u{b7} Cobas").is_some(),
+        "the grid scrolled to the bottom"
+    );
 }
 
 fn go_personnel(h: &mut Harness<'static, TrackerApp>) {
@@ -552,7 +711,13 @@ fn go_personnel(h: &mut Harness<'static, TrackerApp>) {
 }
 
 fn status_of(h: &Harness<'static, TrackerApp>, id: &str) -> Option<StaffStatus> {
-    h.state().session().data().staff.iter().find(|s| s.id == id).map(|s| s.status)
+    h.state()
+        .session()
+        .data()
+        .staff
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.status)
 }
 
 #[test]
@@ -568,7 +733,10 @@ fn hide_staff_removes_from_summary() {
     assert_eq!(status_of(&h, "p-agnes"), Some(StaffStatus::Hidden));
     button(&h, "Summary").click();
     h.run();
-    assert!(h.query_by_label("Agnes").is_none(), "hidden staff vanish from the summary");
+    assert!(
+        h.query_by_label("Agnes").is_none(),
+        "hidden staff vanish from the summary"
+    );
     h.get_by_label("Everyone is up to date");
 }
 
@@ -579,7 +747,10 @@ fn permanent_delete_requires_typed_name() {
     go_personnel(&mut h);
     button(&h, "Actions for Bram").click();
     h.run();
-    assert!(!has_button(&h, "Delete permanently"), "only offered for removed staff");
+    assert!(
+        !has_button(&h, "Delete permanently"),
+        "only offered for removed staff"
+    );
     button(&h, "Remove").click();
     h.run();
     assert_eq!(status_of(&h, "p-bram"), Some(StaffStatus::Removed));
@@ -593,14 +764,23 @@ fn permanent_delete_requires_typed_name() {
     assert!(button(&h, "Delete").accesskit_node().is_disabled());
     h.event(egui::Event::Text("Bra".into()));
     h.run();
-    assert!(button(&h, "Delete").accesskit_node().is_disabled(), "partial name does not unlock");
+    assert!(
+        button(&h, "Delete").accesskit_node().is_disabled(),
+        "partial name does not unlock"
+    );
     h.event(egui::Event::Text("m".into()));
     h.run();
     assert!(!button(&h, "Delete").accesskit_node().is_disabled());
     button(&h, "Delete").click();
     h.run();
     assert_eq!(status_of(&h, "p-bram"), None);
-    assert!(h.state().session().data().records.iter().all(|r| r.staff_id != "p-bram"));
+    assert!(h
+        .state()
+        .session()
+        .data()
+        .records
+        .iter()
+        .all(|r| r.staff_id != "p-bram"));
 }
 
 #[test]
@@ -612,14 +792,20 @@ fn add_staff_with_whole_section_assigned() {
     h.run();
     h.event(egui::Event::Text("Dana".into()));
     h.run();
-    h.query_all_by_label("Assign whole section").next().expect("a section with tests").click();
+    h.query_all_by_label("Assign whole section")
+        .next()
+        .expect("a section with tests")
+        .click();
     h.run();
     button(&h, "Save").click();
     h.run();
     let data = h.state().session().data();
     let dana = data.staff.iter().find(|s| s.name == "Dana").expect("added");
     assert_eq!(dana.assignments.len(), 2, "both Chemistry tests assigned");
-    assert!(dana.assignments.values().all(|a| a.state == AssignState::Assigned));
+    assert!(dana
+        .assignments
+        .values()
+        .all(|a| a.state == AssignState::Assigned));
     assert!(!has_button(&h, "Save"), "editor closed");
 }
 
@@ -658,11 +844,17 @@ fn rename_section_reflects_in_nav() {
     h.run();
     h.key_press(egui::Key::Enter);
     h.run();
-    assert_eq!(h.state().session().data().sections_sorted()[0].name, "Clinical Chemistry");
+    assert_eq!(
+        h.state().session().data().sections_sorted()[0].name,
+        "Clinical Chemistry"
+    );
     button(&h, "Sections").click();
     h.run();
     button(&h, "Clinical Chemistry");
-    assert!(!has_button(&h, "Chemistry"), "the old name is gone from the section tabs");
+    assert!(
+        !has_button(&h, "Chemistry"),
+        "the old name is gone from the section tabs"
+    );
 }
 
 #[test]
@@ -691,7 +883,10 @@ fn audit_filter_by_user() {
     h.run();
     h.get_by_label("mlee").click();
     h.run();
-    assert!(h.query_by_label("Added Bob to personnel").is_none(), "jtan's entry is filtered out");
+    assert!(
+        h.query_by_label("Added Bob to personnel").is_none(),
+        "jtan's entry is filtered out"
+    );
     h.get_by_label("Added Cara to personnel");
 }
 
@@ -700,7 +895,13 @@ fn confirm_all_unconfirmed() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = session(&dir, 1);
     s.mutate(now_ts(), |d, _| {
-        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        d.sections[0].tests = vec![TestSystem {
+            id: "t-cobas".into(),
+            name: "Cobas".into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        }];
         d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
         for i in 0..2u64 {
             let mut r = initial("p-agnes", "t-cobas", 400 - i * 200);
@@ -717,11 +918,30 @@ fn confirm_all_unconfirmed() {
     go_settings_tab(&mut h, "Import & export");
     button(&h, "Confirm all").click();
     h.run();
-    assert_eq!(h.state().session().data().records.iter().filter(|r| r.unconfirmed).count(), 2, "asks first");
+    assert_eq!(
+        h.state()
+            .session()
+            .data()
+            .records
+            .iter()
+            .filter(|r| r.unconfirmed)
+            .count(),
+        2,
+        "asks first"
+    );
     h.get_by_label("Confirm all 2 records?");
     button(&h, "Confirm").click();
     h.run();
-    assert_eq!(h.state().session().data().records.iter().filter(|r| r.unconfirmed).count(), 0);
+    assert_eq!(
+        h.state()
+            .session()
+            .data()
+            .records
+            .iter()
+            .filter(|r| r.unconfirmed)
+            .count(),
+        0
+    );
 }
 
 #[test]
@@ -729,11 +949,16 @@ fn settings_change_recomputes_pills() {
     let dir = tempfile::tempdir().unwrap();
     // Agnes's Semi-annual falls due 45 days from today.
     let today = now_ts().date_naive();
-    let done = (today + chrono::Days::new(45)).checked_sub_months(chrono::Months::new(6)).unwrap();
+    let done = (today + chrono::Days::new(45))
+        .checked_sub_months(chrono::Months::new(6))
+        .unwrap();
     let mut h = seeded(&dir, (today - done).num_days() as u64);
     h.get_by_label("Due within 30 days 0");
     go_settings_tab(&mut h, "General");
-    let due_soon = h.query_all_by_role(egui::accesskit::Role::SpinButton).next().expect("due-soon field");
+    let due_soon = h
+        .query_all_by_role(egui::accesskit::Role::SpinButton)
+        .next()
+        .expect("due-soon field");
     due_soon.click();
     h.run();
     h.event(egui::Event::Text("60".into()));
@@ -750,6 +975,7 @@ fn settings_change_recomputes_pills() {
 
 /// The Summary page's search box (the last text input in the tree).
 fn summary_search<'a>(h: &'a Harness<'static, TrackerApp>) -> egui_kittest::Node<'a> {
-    h.query_all_by_role(egui::accesskit::Role::TextInput).last().expect("search box")
+    h.query_all_by_role(egui::accesskit::Role::TextInput)
+        .last()
+        .expect("search box")
 }
-

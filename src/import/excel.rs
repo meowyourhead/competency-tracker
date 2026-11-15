@@ -95,7 +95,10 @@ pub fn to_cell(v: &Data) -> Cell {
             }
         }
         Data::DateTimeIso(s) => {
-            match s.get(..10).and_then(|p| NaiveDate::parse_from_str(p, "%Y-%m-%d").ok()) {
+            match s
+                .get(..10)
+                .and_then(|p| NaiveDate::parse_from_str(p, "%Y-%m-%d").ok())
+            {
                 Some(date) => Cell::Date(date),
                 None => text_cell(s),
             }
@@ -143,11 +146,16 @@ fn section_hint(grid: &[Vec<Cell>], col: usize) -> String {
 }
 
 pub fn parse_grid(sheet: &str, grid: &[Vec<Cell>]) -> RawSheet {
-    let mut out = RawSheet { name: sheet.to_string(), tests: Vec::new(), blocks: Vec::new() };
+    let mut out = RawSheet {
+        name: sheet.to_string(),
+        tests: Vec::new(),
+        blocks: Vec::new(),
+    };
     let width = grid.iter().map(Vec::len).max().unwrap_or(0);
-    let (Some(comp_col), Some(name_col)) =
-        (find_header(grid, "competency type"), find_header(grid, "name"))
-    else {
+    let (Some(comp_col), Some(name_col)) = (
+        find_header(grid, "competency type"),
+        find_header(grid, "name"),
+    ) else {
         return out;
     };
     let pos_col = find_header(grid, "position");
@@ -165,7 +173,12 @@ pub fn parse_grid(sheet: &str, grid: &[Vec<Cell>]) -> RawSheet {
             && matches!(at(grid, 2, tc), Cell::Empty)
             && (3..grid.len()).any(|r| is_text_a(at(grid, r, tc))))
         .then_some(tc);
-        out.tests.push(RawTest { col, header, tick_col, section_hint: section_hint(grid, col) });
+        out.tests.push(RawTest {
+            col,
+            header,
+            tick_col,
+            section_hint: section_hint(grid, col),
+        });
     }
 
     for row in 3..grid.len() {
@@ -176,7 +189,9 @@ pub fn parse_grid(sheet: &str, grid: &[Vec<Cell>]) -> RawSheet {
         if name.eq_ignore_ascii_case("buffer cells") || name.eq_ignore_ascii_case("buffer row") {
             continue;
         }
-        let title = pos_col.map(|c| collapsed(at(grid, row, c))).unwrap_or_default();
+        let title = pos_col
+            .map(|c| collapsed(at(grid, row, c)))
+            .unwrap_or_default();
         let joined = joined_col.and_then(|c| match at(grid, row, c) {
             Cell::Date(d) => Some(*d),
             _ => None,
@@ -186,7 +201,9 @@ pub fn parse_grid(sheet: &str, grid: &[Vec<Cell>]) -> RawSheet {
                 .iter()
                 .map(|t| StageCell {
                     cell: at(grid, row + k, t.col).clone(),
-                    ticked: t.tick_col.is_some_and(|tc| is_text_a(at(grid, row + k, tc))),
+                    ticked: t
+                        .tick_col
+                        .is_some_and(|tc| is_text_a(at(grid, row + k, tc))),
                 })
                 .collect()
         });
@@ -198,7 +215,14 @@ pub fn parse_grid(sheet: &str, grid: &[Vec<Cell>]) -> RawSheet {
                     .collect()
             })
             .unwrap_or_default();
-        out.blocks.push(RawBlock { row, name, title, joined, stages, remarks });
+        out.blocks.push(RawBlock {
+            row,
+            name,
+            title,
+            joined,
+            stages,
+            remarks,
+        });
     }
     out
 }
@@ -211,9 +235,13 @@ pub fn read_workbook(path: &Path) -> Result<Vec<RawSheet>, ImportError> {
         if !names.iter().any(|n| n == name) {
             return Err(ImportError::MissingSheet(name.to_string()));
         }
-        let range = wb.worksheet_range(name).map_err(|e| ImportError::Open(e.to_string()))?;
+        let range = wb
+            .worksheet_range(name)
+            .map_err(|e| ImportError::Open(e.to_string()))?;
         // `Range` starts at the first used cell; pad so grid indices are absolute.
-        let (r0, c0) = range.start().map_or((0, 0), |(r, c)| (r as usize, c as usize));
+        let (r0, c0) = range
+            .start()
+            .map_or((0, 0), |(r, c)| (r as usize, c as usize));
         let mut grid: Vec<Vec<Cell>> = vec![Vec::new(); r0];
         for row in range.rows() {
             let mut cells = vec![Cell::Empty; c0];
@@ -257,13 +285,73 @@ mod tests {
     // 5 Test A, 6 tick, 7 Test B, 8 tick, 9 Remark(s), 10 Updated
     fn basic_grid() -> Vec<Vec<Cell>> {
         grid(&[
-            &["No", "Name", "Position", "Joined date", "Competency\n Type", "Serology Test System", "", "", "", "Remark(s)", "Updated"],
+            &[
+                "No",
+                "Name",
+                "Position",
+                "Joined date",
+                "Competency\n Type",
+                "Serology Test System",
+                "",
+                "",
+                "",
+                "Remark(s)",
+                "Updated",
+            ],
             &[],
             &["", "", "", "", "", "Test\n A", "", "Test B", "", "", ""],
-            &["1", "Alice Tan", "Senior MLT", "01/02/2019", "Initial", "19/03/2020", "a", "Not Done", "", "needs retrain", ""],
-            &["", "", "", "", "Semi-annual", "20/09/2020", "", "", "", "", ""],
-            &["", "", "", "", "Annual", "21/03/2021", "a", "", "", "second remark", ""],
-            &["", "", "", "", "Next Annual Due", "21/03/2022", "", "", "", "", ""],
+            &[
+                "1",
+                "Alice Tan",
+                "Senior MLT",
+                "01/02/2019",
+                "Initial",
+                "19/03/2020",
+                "a",
+                "Not Done",
+                "",
+                "needs retrain",
+                "",
+            ],
+            &[
+                "",
+                "",
+                "",
+                "",
+                "Semi-annual",
+                "20/09/2020",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
+            &[
+                "",
+                "",
+                "",
+                "",
+                "Annual",
+                "21/03/2021",
+                "a",
+                "",
+                "",
+                "second remark",
+                "",
+            ],
+            &[
+                "",
+                "",
+                "",
+                "",
+                "Next Annual Due",
+                "21/03/2022",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
         ])
     }
 
@@ -271,8 +359,14 @@ mod tests {
     fn to_cell_conversions() {
         assert_eq!(to_cell(&Data::Empty), Cell::Empty);
         assert_eq!(to_cell(&Data::String("   ".into())), Cell::Empty);
-        assert_eq!(to_cell(&Data::String(" Not Done ".into())), text("Not Done"));
-        assert_eq!(to_cell(&Data::String(" 16/9/2024 ".into())), Cell::Date(ymd(2024, 9, 16)));
+        assert_eq!(
+            to_cell(&Data::String(" Not Done ".into())),
+            text("Not Done")
+        );
+        assert_eq!(
+            to_cell(&Data::String(" 16/9/2024 ".into())),
+            Cell::Date(ymd(2024, 9, 16))
+        );
         assert_eq!(to_cell(&Data::String("1/2/25".into())), text("1/2/25"));
         assert_eq!(to_cell(&Data::Float(12.0)), text("12"));
         assert_eq!(to_cell(&Data::Float(12.5)), text("12.5"));
@@ -305,17 +399,38 @@ mod tests {
         assert_eq!(b.stages[1][0], stage(Cell::Date(ymd(2020, 9, 20)), false));
         assert_eq!(b.stages[2][0], stage(Cell::Date(ymd(2021, 3, 21)), true));
         assert_eq!(b.stages[3][0], stage(Cell::Date(ymd(2022, 3, 21)), false));
-        assert_eq!(b.remarks, vec!["needs retrain".to_string(), "second remark".to_string()]);
+        assert_eq!(
+            b.remarks,
+            vec!["needs retrain".to_string(), "second remark".to_string()]
+        );
     }
 
     #[test]
     fn test_without_tick_column() {
         // 3 adjacent TaqPath-style columns, no tick columns, then Remark(s).
         let g = grid(&[
-            &["Name", "Position", "Competency Type", "Molecular Biology Test System", "", "", "Remark(s)"],
+            &[
+                "Name",
+                "Position",
+                "Competency Type",
+                "Molecular Biology Test System",
+                "",
+                "",
+                "Remark(s)",
+            ],
             &[],
-            &["", "", "", "SARS-Cov-2 detection by TaqPath COVID-19", "SARS-Cov-2 detection by TaqPath COVID-19", "SARS-Cov-2 detection by TaqPath COVID-19", ""],
-            &["Bob", "MLT", "Initial", "1/1/2021", "2/1/2021", "3/1/2021", ""],
+            &[
+                "",
+                "",
+                "",
+                "SARS-Cov-2 detection by TaqPath COVID-19",
+                "SARS-Cov-2 detection by TaqPath COVID-19",
+                "SARS-Cov-2 detection by TaqPath COVID-19",
+                "",
+            ],
+            &[
+                "Bob", "MLT", "Initial", "1/1/2021", "2/1/2021", "3/1/2021", "",
+            ],
             &["", "", "Semi-annual", "", "", "", ""],
             &["", "", "Annual", "", "", "", ""],
             &["", "", "Next Annual Due", "", "", "", ""],
@@ -327,7 +442,10 @@ mod tests {
             assert_eq!(t.header, "SARS-Cov-2 detection by TaqPath COVID-19");
             assert_eq!(t.section_hint, "Molecular Biology");
         }
-        assert_eq!(sheet.blocks[0].stages[0][2], stage(Cell::Date(ymd(2021, 1, 3)), false));
+        assert_eq!(
+            sheet.blocks[0].stages[0][2],
+            stage(Cell::Date(ymd(2021, 1, 3)), false)
+        );
     }
 
     #[test]
@@ -335,10 +453,27 @@ mod tests {
         // Molecular/Micro layout: "Joined date" sits in row 3 (index 2), between
         // Competency Type and the tests; it must not become a test.
         let g = grid(&[
-            &["No", "Name", "Position", "Competency Type", "Microbiology Test System", "", "Remark(s)"],
+            &[
+                "No",
+                "Name",
+                "Position",
+                "Competency Type",
+                "Microbiology Test System",
+                "",
+                "Remark(s)",
+            ],
             &[],
             &["", "", "", "", "Joined date", "Gram stain", "", ""],
-            &["1", "Carol", "Scientist", "Initial", "05/06/2018", "7/7/2019", "", ""],
+            &[
+                "1",
+                "Carol",
+                "Scientist",
+                "Initial",
+                "05/06/2018",
+                "7/7/2019",
+                "",
+                "",
+            ],
             &["", "", "", "Semi-annual", "", "", "", ""],
             &["", "", "", "Annual", "", "", "", ""],
             &["", "", "", "Next Annual Due", "", "", "", ""],
@@ -347,23 +482,47 @@ mod tests {
         assert_eq!(sheet.tests.len(), 1);
         assert_eq!(sheet.tests[0].header, "Gram stain");
         assert_eq!(sheet.blocks[0].joined, Some(ymd(2018, 6, 5)));
-        assert_eq!(sheet.blocks[0].stages[0][0].cell, Cell::Date(ymd(2019, 7, 7)));
+        assert_eq!(
+            sheet.blocks[0].stages[0][0].cell,
+            Cell::Date(ymd(2019, 7, 7))
+        );
     }
 
     #[test]
     fn section_hint_from_group_header() {
         let g = grid(&[
-            &["Name", "Position", "Joined date", "Competency Type", "Chemistry & Immunology Test System", "", "Hematology Test System", "", "", "Remark(s)"],
+            &[
+                "Name",
+                "Position",
+                "Joined date",
+                "Competency Type",
+                "Chemistry & Immunology Test System",
+                "",
+                "Hematology Test System",
+                "",
+                "",
+                "Remark(s)",
+            ],
             &[],
             &["", "", "", "", "Abbott Architect", "", "CBC", "", "ESR", ""],
-            &["Dan", "MLT", "1/1/2015", "Initial", "1/1/2020", "a", "2/2/2020", "a", "3/3/2020", ""],
+            &[
+                "Dan", "MLT", "1/1/2015", "Initial", "1/1/2020", "a", "2/2/2020", "a", "3/3/2020",
+                "",
+            ],
             &["", "", "", "Semi-annual", "", "", "", "", "", ""],
             &["", "", "", "Annual", "", "", "", "", "", ""],
             &["", "", "", "Next Annual Due", "", "", "", "", "", ""],
         ]);
         let sheet = parse_grid("Hematology", &g);
-        let hints: Vec<_> = sheet.tests.iter().map(|t| t.section_hint.as_str()).collect();
-        assert_eq!(hints, vec!["Chemistry & Immunology", "Hematology", "Hematology"]);
+        let hints: Vec<_> = sheet
+            .tests
+            .iter()
+            .map(|t| t.section_hint.as_str())
+            .collect();
+        assert_eq!(
+            hints,
+            vec!["Chemistry & Immunology", "Hematology", "Hematology"]
+        );
         assert_eq!(sheet.tests[0].tick_col, Some(5));
         assert_eq!(sheet.tests[2].tick_col, None);
     }
@@ -371,7 +530,14 @@ mod tests {
     #[test]
     fn skips_buffer_rows() {
         let g = grid(&[
-            &["Name", "Position", "Competency Type", "Serology Test System", "", "Remark(s)"],
+            &[
+                "Name",
+                "Position",
+                "Competency Type",
+                "Serology Test System",
+                "",
+                "Remark(s)",
+            ],
             &[],
             &["", "", "", "T1", "", ""],
             &["Buffer Cells", "", "Initial", "", "", ""],
@@ -399,11 +565,24 @@ mod tests {
         let path = std::env::var("TRACKER_XLSM").expect("set TRACKER_XLSM to the workbook path");
         let sheets = read_workbook(Path::new(&path)).unwrap();
         for s in &sheets {
-            println!("{:<24} tests={:<3} blocks={}", s.name, s.tests.len(), s.blocks.len());        }
+            println!(
+                "{:<24} tests={:<3} blocks={}",
+                s.name,
+                s.tests.len(),
+                s.blocks.len()
+            );
+        }
         assert_eq!(sheets.len(), 6);
         let sero = sheets.iter().find(|s| s.name == "Serology").unwrap();
         assert_eq!(sero.tests.len(), 14);
-        let chem = sheets.iter().find(|s| s.name == "Chemistry & Immunology").unwrap();
-        assert!(chem.blocks.len() >= 25, "chem blocks = {}", chem.blocks.len());
+        let chem = sheets
+            .iter()
+            .find(|s| s.name == "Chemistry & Immunology")
+            .unwrap();
+        assert!(
+            chem.blocks.len() >= 25,
+            "chem blocks = {}",
+            chem.blocks.len()
+        );
     }
 }

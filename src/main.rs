@@ -14,7 +14,8 @@ use competency_tracker::ui::app::TrackerApp;
 const TITLE: &str = "Competency Tracker";
 
 fn open_session() -> Result<Session, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("Couldn't locate the program file: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("Couldn't locate the program file: {e}"))?;
     let exe_dir = exe.parent().ok_or("Couldn't locate the program folder")?;
     let (dir, from_config) = resolve_data_dir_with_source(exe_dir);
     if let Some(question) = first_run_prompt(&dir, from_config) {
@@ -30,8 +31,15 @@ fn open_session() -> Result<Session, String> {
         }
     }
     let root = dir.root.clone();
-    Session::open(dir, &windows_username(), &machine_name(), std::process::id(), now_ts(), Instant::now())
-        .map_err(|e| format!("Couldn't open the data folder {}:\n{e}", root.display()))
+    Session::open(
+        dir,
+        &windows_username(),
+        &machine_name(),
+        std::process::id(),
+        now_ts(),
+        Instant::now(),
+    )
+    .map_err(|e| format!("Couldn't open the data folder {}:\n{e}", root.display()))
 }
 
 fn fail(message: &str) -> ! {
@@ -52,10 +60,19 @@ fn options(renderer: eframe::Renderer) -> eframe::NativeOptions {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app.png")) {
         viewport = viewport.with_icon(icon);
     }
-    eframe::NativeOptions { viewport, renderer, ..Default::default() }
+    eframe::NativeOptions {
+        viewport,
+        renderer,
+        ..Default::default()
+    }
 }
 
-fn run(renderer: eframe::Renderer, session: &RefCell<Option<Session>>, prefs: &Prefs, path: &Option<PathBuf>) -> eframe::Result {
+fn run(
+    renderer: eframe::Renderer,
+    session: &RefCell<Option<Session>>,
+    prefs: &Prefs,
+    path: &Option<PathBuf>,
+) -> eframe::Result {
     eframe::run_native(
         TITLE,
         options(renderer),
@@ -65,7 +82,12 @@ fn run(renderer: eframe::Renderer, session: &RefCell<Option<Session>>, prefs: &P
                 Some(s) => s,
                 None => open_session()?,
             };
-            Ok(Box::new(TrackerApp::new(cc, session, prefs.clone(), path.clone())))
+            Ok(Box::new(TrackerApp::new(
+                cc,
+                session,
+                prefs.clone(),
+                path.clone(),
+            )))
         }),
     )
 }

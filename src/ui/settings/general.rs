@@ -34,7 +34,9 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut GeneralTab) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             let dirty = *draft != saved;
-            save = ui.add_enabled(editing && dirty, Button::new("Save settings")).clicked();
+            save = ui
+                .add_enabled(editing && dirty, Button::new("Save settings"))
+                .clicked();
             if ui.add_enabled(dirty, Button::new("Revert")).clicked() {
                 *draft = saved.clone();
             }
@@ -42,7 +44,9 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut GeneralTab) {
     });
     if save {
         let s = draft.clone();
-        apply(cx, "Settings saved", "Couldn't save settings", |d, a| ops::update_settings(d, a, s));
+        apply(cx, "Settings saved", "Couldn't save settings", |d, a| {
+            ops::update_settings(d, a, s)
+        });
     }
     archive(ui, cx, &saved);
     data_folder(ui, cx);
@@ -52,36 +56,75 @@ fn fields(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings) {
     let hint = |ui: &mut egui::Ui, text: &str| {
         ui.label(RichText::new(text).color(pal.muted));
     };
-    Grid::new("general_settings").num_columns(3).spacing([16.0, 10.0]).show(ui, |ui| {
-        ui.label("Due soon");
-        ui.add(DragValue::new(&mut s.due_soon_days).range(1..=365).suffix(" days"));
-        hint(ui, "Items due within this many days show yellow.");
-        ui.end_row();
+    Grid::new("general_settings")
+        .num_columns(3)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
+            ui.label("Due soon");
+            ui.add(
+                DragValue::new(&mut s.due_soon_days)
+                    .range(1..=365)
+                    .suffix(" days"),
+            );
+            hint(ui, "Items due within this many days show yellow.");
+            ui.end_row();
 
-        ui.label("Date variance tolerance");
-        ui.add(DragValue::new(&mut s.variance_tolerance_days).range(0..=365).suffix(" days"));
-        hint(ui, "Completions this close to their due date get no early / late tag.");
-        ui.end_row();
+            ui.label("Date variance tolerance");
+            ui.add(
+                DragValue::new(&mut s.variance_tolerance_days)
+                    .range(0..=365)
+                    .suffix(" days"),
+            );
+            hint(
+                ui,
+                "Completions this close to their due date get no early / late tag.",
+            );
+            ui.end_row();
 
-        ui.label("Inactivity timeout");
-        ui.add(DragValue::new(&mut s.inactivity_minutes).range(1..=120).suffix(" min"));
-        hint(ui, "Editing stops after this long without activity.");
-        ui.end_row();
+            ui.label("Inactivity timeout");
+            ui.add(
+                DragValue::new(&mut s.inactivity_minutes)
+                    .range(1..=120)
+                    .suffix(" min"),
+            );
+            hint(ui, "Editing stops after this long without activity.");
+            ui.end_row();
 
-        ui.label("Initial due");
-        optional_days(ui, &mut s.initial_due_days, "After assignment", INITIAL_DUE_DEFAULT, 0..=365);
-        hint(ui, "When off, a missing Initial shows \u{201c}Initial pending\u{201d}.");
-        ui.end_row();
+            ui.label("Initial due");
+            optional_days(
+                ui,
+                &mut s.initial_due_days,
+                "After assignment",
+                INITIAL_DUE_DEFAULT,
+                0..=365,
+            );
+            hint(
+                ui,
+                "When off, a missing Initial shows \u{201c}Initial pending\u{201d}.",
+            );
+            ui.end_row();
 
-        ui.label("Archive snapshots");
-        optional_days(ui, &mut s.archive_after_days, "Older than", ARCHIVE_DEFAULT, 7..=3650);
-        hint(ui, "Moves old daily snapshots to the archive folder.");
-        ui.end_row();
-    });
+            ui.label("Archive snapshots");
+            optional_days(
+                ui,
+                &mut s.archive_after_days,
+                "Older than",
+                ARCHIVE_DEFAULT,
+                7..=3650,
+            );
+            hint(ui, "Moves old daily snapshots to the archive folder.");
+            ui.end_row();
+        });
 }
 
 /// A checkbox that switches the setting on (with `default`) and the days field.
-fn optional_days(ui: &mut egui::Ui, v: &mut Option<i64>, label: &str, default: i64, range: std::ops::RangeInclusive<i64>) {
+fn optional_days(
+    ui: &mut egui::Ui,
+    v: &mut Option<i64>,
+    label: &str,
+    default: i64,
+    range: std::ops::RangeInclusive<i64>,
+) {
     ui.horizontal(|ui| {
         let mut on = v.is_some();
         if ui.checkbox(&mut on, label).changed() {
@@ -104,11 +147,20 @@ fn archive(ui: &mut egui::Ui, cx: &mut Ctx, saved: &Settings) {
         };
         ui.label(RichText::new(text).color(pal.muted));
         ui.add_space(4.0);
-        let why = if saved.archive_after_days.is_none() { "Archiving is off" } else { "Start editing to make changes" };
-        let button = ui.add_enabled(editing && saved.archive_after_days.is_some(), Button::new("Archive now"));
+        let why = if saved.archive_after_days.is_none() {
+            "Archiving is off"
+        } else {
+            "Start editing to make changes"
+        };
+        let button = ui.add_enabled(
+            editing && saved.archive_after_days.is_some(),
+            Button::new("Archive now"),
+        );
         run = button.on_disabled_hover_text(why).clicked();
     });
-    let Some(days) = saved.archive_after_days.filter(|_| run) else { return };
+    let Some(days) = saved.archive_after_days.filter(|_| run) else {
+        return;
+    };
     let msg = match archive_old(cx.session.data_dir(), days, cx.today) {
         Ok(0) => "No snapshots old enough to archive".to_owned(),
         Ok(1) => "Archived 1 snapshot".to_owned(),
@@ -124,14 +176,28 @@ fn data_folder(ui: &mut egui::Ui, cx: &mut Ctx) {
     let mut open = false;
     card(ui, pal, "Data folder", |ui| {
         ui.horizontal(|ui| {
-            ui.add(egui::Label::new(RichText::new(root.display().to_string()).monospace().color(pal.text)).selectable(true));
+            ui.add(
+                egui::Label::new(
+                    RichText::new(root.display().to_string())
+                        .monospace()
+                        .color(pal.text),
+                )
+                .selectable(true),
+            );
             open = ui.button("Open folder").clicked();
         });
-        ui.label(RichText::new("To move the data folder, edit tracker.config.json next to the app.").color(pal.muted));
+        ui.label(
+            RichText::new("To move the data folder, edit tracker.config.json next to the app.")
+                .color(pal.muted),
+        );
     });
     if open {
-        if let Err(e) = std::process::Command::new("explorer.exe").arg(&root).spawn() {
-            cx.toasts.push(Toast::new(format!("Couldn't open the folder: {e}")));
+        if let Err(e) = std::process::Command::new("explorer.exe")
+            .arg(&root)
+            .spawn()
+        {
+            cx.toasts
+                .push(Toast::new(format!("Couldn't open the folder: {e}")));
         }
     }
 }

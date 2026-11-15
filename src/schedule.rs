@@ -1,4 +1,4 @@
-﻿use chrono::{Months, NaiveDate};
+use chrono::{Months, NaiveDate};
 
 use crate::model::{DueOverride, OverrideSource, Record, Rule, Settings, Stage};
 
@@ -14,7 +14,12 @@ pub fn ordinal(n: u32) -> String {
     format!("{n}{suffix}")
 }
 
-static EMPTY_STAGE: Stage = Stage { label: String::new(), interval_months: None, repeats: false, ordinal: false };
+static EMPTY_STAGE: Stage = Stage {
+    label: String::new(),
+    interval_months: None,
+    repeats: false,
+    ordinal: false,
+};
 
 /// The stage at `idx`; indexes past the end return the last stage (which is
 /// expected to repeat). An empty rule yields an empty placeholder stage.
@@ -64,7 +69,11 @@ fn add_interval(rule: &Rule, stage_idx: u32, from: NaiveDate) -> Option<NaiveDat
 }
 
 pub fn next_due(rule: &Rule, s: &PairState, settings: &Settings) -> DueInfo {
-    let latest = s.records.iter().copied().max_by_key(|r| (r.completed_on, r.stage_index));
+    let latest = s
+        .records
+        .iter()
+        .copied()
+        .max_by_key(|r| (r.completed_on, r.stage_index));
     let mut next = latest.map_or(0, |r| r.stage_index + 1);
     while s.skipped.contains(&next) {
         next += 1;
@@ -76,7 +85,11 @@ pub fn next_due(rule: &Rule, s: &PairState, settings: &Settings) -> DueInfo {
             _ => None,
         },
     };
-    let mut source = if due_on.is_some() { DueSource::Rule } else { DueSource::None };
+    let mut source = if due_on.is_some() {
+        DueSource::Rule
+    } else {
+        DueSource::None
+    };
     if let Some(o) = s.override_ {
         due_on = Some(o.due_on);
         source = match o.source {
@@ -160,18 +173,30 @@ mod tests {
             completed_on: on,
             comment: String::new(),
             by: "u".into(),
-            at: chrono::FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            at: chrono::FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .unwrap(),
             imported: false,
             unconfirmed: false,
         }
     }
 
     fn recs(items: &[(u32, NaiveDate)]) -> Vec<Record> {
-        items.iter().enumerate().map(|(i, (s, d))| rec(i, *s, *d)).collect()
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, (s, d))| rec(i, *s, *d))
+            .collect()
     }
 
     fn pair(v: &[Record]) -> PairState<'_> {
-        PairState { records: v.iter().collect(), skipped: vec![], override_: None, assigned_on: None }
+        PairState {
+            records: v.iter().collect(),
+            skipped: vec![],
+            override_: None,
+            assigned_on: None,
+        }
     }
 
     #[test]
@@ -187,8 +212,14 @@ mod tests {
 
     #[test]
     fn ordinals() {
-        let got: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 111].iter().map(|n| ordinal(*n)).collect();
-        assert_eq!(got, ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "111th"]);
+        let got: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 111]
+            .iter()
+            .map(|n| ordinal(*n))
+            .collect();
+        assert_eq!(
+            got,
+            ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "111th"]
+        );
     }
 
     #[test]
@@ -238,11 +269,20 @@ mod tests {
         let v = recs(&[(0, ymd(2024, 8, 31))]);
         p = pair(&v);
         p.skipped = vec![1];
-        assert_eq!(next_due(&r, &p, &Settings::default()).due_on, Some(ymd(2025, 8, 31)));
+        assert_eq!(
+            next_due(&r, &p, &Settings::default()).due_on,
+            Some(ymd(2025, 8, 31))
+        );
         // semi-annual: 2024-08-31 + 6 months = 2025-02-28
-        assert_eq!(next_due(&r, &pair(&v), &Settings::default()).due_on, Some(ymd(2025, 2, 28)));
+        assert_eq!(
+            next_due(&r, &pair(&v), &Settings::default()).due_on,
+            Some(ymd(2025, 2, 28))
+        );
         let v2 = recs(&[(0, ymd(2023, 8, 31))]);
-        assert_eq!(next_due(&r, &pair(&v2), &Settings::default()).due_on, Some(ymd(2024, 2, 29)));
+        assert_eq!(
+            next_due(&r, &pair(&v2), &Settings::default()).due_on,
+            Some(ymd(2024, 2, 29))
+        );
     }
 
     #[test]
@@ -271,7 +311,10 @@ mod tests {
         let v: Vec<Record> = vec![];
         let mut p = pair(&v);
         p.assigned_on = Some(ymd(2026, 1, 1));
-        let s = Settings { initial_due_days: Some(30), ..Settings::default() };
+        let s = Settings {
+            initial_due_days: Some(30),
+            ..Settings::default()
+        };
         let i = next_due(&r, &p, &s);
         assert_eq!(i.due_on, Some(ymd(2026, 1, 31)));
         assert_eq!(i.source, DueSource::Rule);
@@ -300,7 +343,10 @@ mod tests {
         o.source = OverrideSource::Manual;
         let mut p = pair(&v);
         p.override_ = Some(&o);
-        assert_eq!(next_due(&r, &p, &Settings::default()).source, DueSource::Manual);
+        assert_eq!(
+            next_due(&r, &p, &Settings::default()).source,
+            DueSource::Manual
+        );
     }
 
     #[test]
@@ -308,7 +354,10 @@ mod tests {
         let r = Rule::default_global();
         // out-of-order insertion
         let v = recs(&[(1, ymd(2024, 11, 2)), (0, ymd(2024, 5, 2))]);
-        assert_eq!(next_due(&r, &pair(&v), &Settings::default()).next_stage_index, 2);
+        assert_eq!(
+            next_due(&r, &pair(&v), &Settings::default()).next_stage_index,
+            2
+        );
     }
 
     #[test]
@@ -319,7 +368,9 @@ mod tests {
         assert_eq!(classify(Some(ymd(2026, 12, 14)), t, 30), DueStatus::DueSoon);
         assert_eq!(classify(Some(ymd(2026, 12, 15)), t, 30), DueStatus::OnTrack);
         assert_eq!(classify(None, t, 30), DueStatus::NotStarted);
-        assert!(DueStatus::Overdue < DueStatus::DueSoon && DueStatus::OnTrack < DueStatus::NotStarted);
+        assert!(
+            DueStatus::Overdue < DueStatus::DueSoon && DueStatus::OnTrack < DueStatus::NotStarted
+        );
     }
 
     #[test]
@@ -346,4 +397,3 @@ mod tests {
         assert_eq!(completion_variance(&r, &pair(&v), "rec-1"), Some(-40));
     }
 }
-

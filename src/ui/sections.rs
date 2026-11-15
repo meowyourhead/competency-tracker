@@ -5,8 +5,8 @@
 use chrono::NaiveDate;
 use egui::text::LayoutJob;
 use egui::{
-    Align, Button, CornerRadius, CursorIcon, FontId, Frame, Label, Layout, Margin, Popup, Rect, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, UiBuilder, Vec2, WidgetInfo, WidgetType,
+    Align, Button, CornerRadius, CursorIcon, FontId, Frame, Label, Layout, Margin, Popup, Rect,
+    RichText, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 use egui_phosphor::regular as icon;
 
@@ -41,7 +41,11 @@ pub(crate) struct SectionsState {
 }
 
 enum CellView {
-    Due { info: DueInfo, status: DueStatus, delayed: bool },
+    Due {
+        info: DueInfo,
+        status: DueStatus,
+        delayed: bool,
+    },
     Na,
     Unassigned,
 }
@@ -70,10 +74,16 @@ impl SectionsState {
     /// Rebuilds the grid only when the data revision, the date or the section changed.
     fn refresh(&mut self, session: &Session, today: NaiveDate, section: &Section) {
         let rev = session.revision();
-        if matches!(&self.cache, Some((r, d, s, _)) if *r == rev && *d == today && *s == section.id) {
+        if matches!(&self.cache, Some((r, d, s, _)) if *r == rev && *d == today && *s == section.id)
+        {
             return;
         }
-        self.cache = Some((rev, today, section.id.clone(), build_grid(session.data(), section, today)));
+        self.cache = Some((
+            rev,
+            today,
+            section.id.clone(),
+            build_grid(session.data(), section, today),
+        ));
     }
 }
 
@@ -95,31 +105,59 @@ fn build_grid(data: &Data, section: &Section, today: NaiveDate) -> Grid {
                 .iter()
                 .map(|t| match s.assignments.get(&t.id).map(|a| a.state) {
                     Some(AssignState::Assigned) => {
-                        let info = next_due(data.rule_for_test(&t.id), &idx.pair(&s.id, &t.id), &data.settings);
+                        let info = next_due(
+                            data.rule_for_test(&t.id),
+                            &idx.pair(&s.id, &t.id),
+                            &data.settings,
+                        );
                         let status = classify(info.due_on, today, data.settings.due_soon_days);
-                        let delayed =
-                            idx.delay_notes(&s.id, &t.id).iter().any(|n| n.for_stage_index == info.next_stage_index);
-                        CellView::Due { info, status, delayed }
+                        let delayed = idx
+                            .delay_notes(&s.id, &t.id)
+                            .iter()
+                            .any(|n| n.for_stage_index == info.next_stage_index);
+                        CellView::Due {
+                            info,
+                            status,
+                            delayed,
+                        }
                     }
                     Some(AssignState::Na) => CellView::Na,
                     None => CellView::Unassigned,
                 })
                 .collect();
-            Row { id: s.id.clone(), name: s.name.clone(), title: s.title.clone(), cells }
+            Row {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                title: s.title.clone(),
+                cells,
+            }
         })
         .collect();
-    Grid { columns: tests.iter().map(|t| (t.id.clone(), t.name.clone())).collect(), rows }
+    Grid {
+        columns: tests
+            .iter()
+            .map(|t| (t.id.clone(), t.name.clone()))
+            .collect(),
+        rows,
+    }
 }
 
 fn matches_status(cell: &CellView, f: StatusFilter) -> bool {
-    let CellView::Due { status, delayed, .. } = cell else { return false };
+    let CellView::Due {
+        status, delayed, ..
+    } = cell
+    else {
+        return false;
+    };
     match f {
         StatusFilter::All => true,
         StatusFilter::Overdue => *status == DueStatus::Overdue,
         StatusFilter::DueSoon => *status == DueStatus::DueSoon,
         StatusFilter::OnTrack => *status == DueStatus::OnTrack,
         StatusFilter::NotStarted => *status == DueStatus::NotStarted,
-        StatusFilter::Delayed => *delayed && matches!(status, DueStatus::Overdue | DueStatus::DueSoon),
+        StatusFilter::Delayed => {
+            *delayed && matches!(status, DueStatus::Overdue | DueStatus::DueSoon)
+        }
     }
 }
 
@@ -129,7 +167,11 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
     let pal = cx.pal;
     let session: &Session = cx.session;
     let data = session.data();
-    let sections: Vec<&Section> = data.sections_sorted().into_iter().filter(|s| !s.retired).collect();
+    let sections: Vec<&Section> = data
+        .sections_sorted()
+        .into_iter()
+        .filter(|s| !s.retired)
+        .collect();
     let Some(first) = sections.first() else {
         empty_state(ui, "No sections", "Add sections in Settings.");
         return;
@@ -146,37 +188,67 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
     }
     ui.add_space(12.0);
     state.refresh(session, cx.today, section);
-    let SectionsState { status, test, title, text, sort_by_test, cache, .. } = state;
+    let SectionsState {
+        status,
+        test,
+        title,
+        text,
+        sort_by_test,
+        cache,
+        ..
+    } = state;
     let grid = &cache.as_ref().expect("refreshed above").3;
-    if test.as_ref().is_some_and(|t| !grid.columns.iter().any(|(id, _)| id == t)) {
+    if test
+        .as_ref()
+        .is_some_and(|t| !grid.columns.iter().any(|(id, _)| id == t))
+    {
         *test = None;
     }
     filters(ui, pal, data, grid, status, test, title, text);
     ui.add_space(12.0);
 
     if grid.columns.is_empty() {
-        empty_state(ui, "No test systems", &format!("Add test systems to {} in Settings.", section.name));
+        empty_state(
+            ui,
+            "No test systems",
+            &format!("Add test systems to {} in Settings.", section.name),
+        );
         return;
     }
     if grid.rows.is_empty() {
-        empty_state(ui, "No staff assigned", &format!("Assign staff to {} from Personnel.", section.name));
+        empty_state(
+            ui,
+            "No staff assigned",
+            &format!("Assign staff to {} from Personnel.", section.name),
+        );
         return;
     }
-    let cols: Vec<usize> = (0..grid.columns.len()).filter(|&c| test.as_ref().is_none_or(|t| *t == grid.columns[c].0)).collect();
+    let cols: Vec<usize> = (0..grid.columns.len())
+        .filter(|&c| test.as_ref().is_none_or(|t| *t == grid.columns[c].0))
+        .collect();
     let needle = text.trim().to_lowercase();
     let mut rows: Vec<usize> = (0..grid.rows.len())
         .filter(|&r| {
             let row = &grid.rows[r];
-            title.as_ref().is_none_or(|t| t.eq_ignore_ascii_case(&row.title))
+            title
+                .as_ref()
+                .is_none_or(|t| t.eq_ignore_ascii_case(&row.title))
                 && (needle.is_empty() || row.name.to_lowercase().contains(&needle))
-                && (*status == StatusFilter::All || cols.iter().any(|&c| matches_status(&row.cells[c], *status)))
+                && (*status == StatusFilter::All
+                    || cols.iter().any(|&c| matches_status(&row.cells[c], *status)))
         })
         .collect();
     if rows.is_empty() {
-        empty_state(ui, "No matches", "Nobody in this section matches these filters.");
+        empty_state(
+            ui,
+            "No matches",
+            "Nobody in this section matches these filters.",
+        );
         return;
     }
-    let sort_col = sort_by_test.as_ref().and_then(|t| cols.iter().copied().find(|&c| grid.columns[c].0 == *t));
+    let sort_col = sort_by_test
+        .as_ref()
+        .and_then(|t| cols.iter().copied().find(|&c| grid.columns[c].0 == *t));
     if let Some(c) = sort_col {
         let due = |r: usize| match &grid.rows[r].cells[c] {
             CellView::Due { info, .. } => info.due_on,
@@ -185,14 +257,29 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
         rows.sort_by_key(|&r| (due(r).is_none(), due(r)));
     }
 
-    let action = draw_grid(ui, pal, session.is_editing(), grid, &cols, &rows, sort_col, &section.id);
+    let action = draw_grid(
+        ui,
+        pal,
+        session.is_editing(),
+        grid,
+        &cols,
+        &rows,
+        sort_col,
+        &section.id,
+    );
     match action {
         Some(GridAction::Open(s, t)) => *cx.open_detail = Some((s, t)),
         Some(GridAction::Sort(t)) => {
-            *sort_by_test = if sort_by_test.as_ref() == Some(&t) { None } else { Some(t) };
+            *sort_by_test = if sort_by_test.as_ref() == Some(&t) {
+                None
+            } else {
+                Some(t)
+            };
         }
         Some(GridAction::Assign(s, t)) => {
-            let res = cx.session.mutate(cx.now, |d, a| ops::set_assignment(d, a, &s, &t, Some(AssignState::Assigned)));
+            let res = cx.session.mutate(cx.now, |d, a| {
+                ops::set_assignment(d, a, &s, &t, Some(AssignState::Assigned))
+            });
             let msg = match res {
                 Some(Ok(())) => "Assigned".to_owned(),
                 Some(Err(e)) => format!("Couldn't assign: {e}"),
@@ -205,7 +292,12 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
 }
 
 /// A segmented pill row of the sections; returns the newly picked one.
-fn section_pills(ui: &mut egui::Ui, pal: &Palette, sections: &[&Section], current: &str) -> Option<Id> {
+fn section_pills(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    sections: &[&Section],
+    current: &str,
+) -> Option<Id> {
     let mut picked = None;
     Frame::new()
         .fill(pal.sidebar)
@@ -217,7 +309,11 @@ fn section_pills(ui: &mut egui::Ui, pal: &Palette, sections: &[&Section], curren
                 ui.spacing_mut().item_spacing.x = 2.0;
                 for s in sections {
                     let selected = s.id == current;
-                    if ui.add(Button::selectable(selected, s.name.as_str()).corner_radius(8)).clicked() && !selected {
+                    if ui
+                        .add(Button::selectable(selected, s.name.as_str()).corner_radius(8))
+                        .clicked()
+                        && !selected
+                    {
                         picked = Some(s.id.clone());
                     }
                 }
@@ -246,7 +342,10 @@ fn filters(
         (StatusFilter::NotStarted, "Not started".to_owned()),
         (StatusFilter::Delayed, "Delayed".to_owned()),
     ];
-    let titles: Vec<(String, String)> = distinct_titles(data).into_iter().map(|t| (t.clone(), t)).collect();
+    let titles: Vec<(String, String)> = distinct_titles(data)
+        .into_iter()
+        .map(|t| (t.clone(), t))
+        .collect();
     ui.horizontal(|ui| {
         let mut chosen = (*status != StatusFilter::All).then_some(*status);
         if chip_select(ui, "Status", &mut chosen, &statuses) {
@@ -254,8 +353,15 @@ fn filters(
         }
         chip_select(ui, "Test system", test, &grid.columns);
         chip_select(ui, "Title", title, &titles);
-        let any = *status != StatusFilter::All || test.is_some() || title.is_some() || !text.trim().is_empty();
-        if any && ui.add(Button::new(RichText::new("Clear filters").color(pal.muted)).frame(false)).clicked() {
+        let any = *status != StatusFilter::All
+            || test.is_some()
+            || title.is_some()
+            || !text.trim().is_empty();
+        if any
+            && ui
+                .add(Button::new(RichText::new("Clear filters").color(pal.muted)).frame(false))
+                .clicked()
+        {
             *status = StatusFilter::All;
             *test = None;
             *title = None;
@@ -284,18 +390,34 @@ fn draw_grid(
     let bar = ui.spacing().scroll.allocated_width();
     let size = Vec2::new(
         (NAME_W + content.x + bar).min(avail.width()),
-        (HEAD_H + content.y + bar).min(avail.height()).max(HEAD_H + 2.0 * ROW_H),
+        (HEAD_H + content.y + bar)
+            .min(avail.height())
+            .max(HEAD_H + 2.0 * ROW_H),
     );
     let outer = Rect::from_min_size(avail.min, size);
     ui.allocate_rect(outer, Sense::hover());
-    ui.painter().rect(outer, CornerRadius::same(10), pal.card, Stroke::new(1.0, pal.border), StrokeKind::Inside);
-    let header = Rect::from_min_max(outer.min + Vec2::new(NAME_W, 0.0), egui::pos2(outer.right(), outer.top() + HEAD_H));
-    let names = Rect::from_min_max(outer.min + Vec2::new(0.0, HEAD_H), egui::pos2(outer.left() + NAME_W, outer.bottom()));
+    ui.painter().rect(
+        outer,
+        CornerRadius::same(10),
+        pal.card,
+        Stroke::new(1.0, pal.border),
+        StrokeKind::Inside,
+    );
+    let header = Rect::from_min_max(
+        outer.min + Vec2::new(NAME_W, 0.0),
+        egui::pos2(outer.right(), outer.top() + HEAD_H),
+    );
+    let names = Rect::from_min_max(
+        outer.min + Vec2::new(0.0, HEAD_H),
+        egui::pos2(outer.left() + NAME_W, outer.bottom()),
+    );
     let body = Rect::from_min_max(outer.min + Vec2::new(NAME_W, HEAD_H), outer.max);
 
     // The wheel over the header or the name column scrolls the cells too.
     let offset_key = ui.id().with(("grid_offset", section_id));
-    let mut area = ScrollArea::both().id_salt(("grid_scroll", section_id)).auto_shrink(false);
+    let mut area = ScrollArea::both()
+        .id_salt(("grid_scroll", section_id))
+        .auto_shrink(false);
     if ui.rect_contains_pointer(header) || ui.rect_contains_pointer(names) {
         let delta = ui.input(|i| i.smooth_scroll_delta);
         if delta != Vec2::ZERO {
@@ -305,27 +427,28 @@ fn draw_grid(
             area = area.scroll_offset((prev - delta).clamp(Vec2::ZERO, max));
         }
     }
-    let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body.shrink(1.0)).id_salt(("grid_body", section_id)));
-    let out = area.show_viewport(
-        &mut body_ui,
-        |ui, viewport| {
-            let origin = ui.max_rect().min;
-            let first = (viewport.top() / ROW_H).floor().max(0.0) as usize;
-            let last = ((viewport.bottom() / ROW_H).ceil() as usize).min(rows.len());
-            for (i, &r) in rows.iter().enumerate().take(last).skip(first) {
-                let row = &grid.rows[r];
-                for (j, &c) in cols.iter().enumerate() {
-                    let min = origin + Vec2::new(j as f32 * COL_W, i as f32 * ROW_H);
-                    let rect = Rect::from_min_size(min, Vec2::new(COL_W, ROW_H));
-                    let test = &grid.columns[c];
-                    if let Some(a) = cell(ui, pal, editing, rect, row, test, &row.cells[c]) {
-                        action = Some(a);
-                    }
+    let mut body_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(body.shrink(1.0))
+            .id_salt(("grid_body", section_id)),
+    );
+    let out = area.show_viewport(&mut body_ui, |ui, viewport| {
+        let origin = ui.max_rect().min;
+        let first = (viewport.top() / ROW_H).floor().max(0.0) as usize;
+        let last = ((viewport.bottom() / ROW_H).ceil() as usize).min(rows.len());
+        for (i, &r) in rows.iter().enumerate().take(last).skip(first) {
+            let row = &grid.rows[r];
+            for (j, &c) in cols.iter().enumerate() {
+                let min = origin + Vec2::new(j as f32 * COL_W, i as f32 * ROW_H);
+                let rect = Rect::from_min_size(min, Vec2::new(COL_W, ROW_H));
+                let test = &grid.columns[c];
+                if let Some(a) = cell(ui, pal, editing, rect, row, test, &row.cells[c]) {
+                    action = Some(a);
                 }
             }
-            ui.allocate_rect(Rect::from_min_size(origin, content), Sense::hover());
-        },
-    );
+        }
+        ui.allocate_rect(Rect::from_min_size(origin, content), Sense::hover());
+    });
     let offset = out.state.offset;
     ui.data_mut(|d| d.insert_temp(offset_key, offset));
     let line = Stroke::new(1.0, pal.border);
@@ -334,7 +457,10 @@ fn draw_grid(
     let hp = ui.painter_at(header);
     for (j, &c) in cols.iter().enumerate() {
         let rect = Rect::from_min_size(
-            egui::pos2(header.left() + 1.0 + j as f32 * COL_W - offset.x, header.top()),
+            egui::pos2(
+                header.left() + 1.0 + j as f32 * COL_W - offset.x,
+                header.top(),
+            ),
             Vec2::new(COL_W, HEAD_H),
         );
         let (id, name) = &grid.columns[c];
@@ -342,21 +468,38 @@ fn draw_grid(
         if !hit.is_positive() {
             continue;
         }
-        let resp = ui.interact(hit, ui.id().with(("grid_head", section_id, id)), Sense::click());
+        let resp = ui.interact(
+            hit,
+            ui.id().with(("grid_head", section_id, id)),
+            Sense::click(),
+        );
         resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
-        let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("Sort by {name} due date"));
+        let resp = resp
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(format!("Sort by {name} due date"));
         if resp.hovered() {
             hp.rect_filled(rect.shrink(3.0), CornerRadius::same(6), pal.sidebar);
         }
         let sorted = sort_col == Some(c);
-        let mut job = LayoutJob::simple(name.clone(), FontId::new(13.0, medium()), pal.text, COL_W - 34.0);
+        let mut job = LayoutJob::simple(
+            name.clone(),
+            FontId::new(13.0, medium()),
+            pal.text,
+            COL_W - 34.0,
+        );
         job.wrap.max_rows = 2;
         let galley = ui.painter().layout_job(job);
         let pos = egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0);
         hp.galley(pos, galley, pal.text);
         if sorted {
             let glyph = egui::pos2(rect.right() - 14.0, rect.center().y);
-            hp.text(glyph, egui::Align2::CENTER_CENTER, icon::SORT_ASCENDING, FontId::proportional(14.0), pal.accent);
+            hp.text(
+                glyph,
+                egui::Align2::CENTER_CENTER,
+                icon::SORT_ASCENDING,
+                FontId::proportional(14.0),
+                pal.accent,
+            );
         }
         if resp.clicked() {
             action = Some(GridAction::Sort(id.clone()));
@@ -373,21 +516,44 @@ fn draw_grid(
         let row = &grid.rows[r];
         let x = names.left() + 16.0;
         let has_title = !row.title.is_empty();
-        let name_y = if has_title { top + ROW_H / 2.0 - 9.0 } else { top + ROW_H / 2.0 };
+        let name_y = if has_title {
+            top + ROW_H / 2.0 - 9.0
+        } else {
+            top + ROW_H / 2.0
+        };
         let font = FontId::new(14.0, medium());
-        let galley = ui.painter().layout_no_wrap(row.name.clone(), font, pal.text);
-        let clip = Rect::from_min_max(egui::pos2(x, top), egui::pos2(names.right() - 8.0, top + ROW_H)).intersect(names);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(row.name.clone(), font, pal.text);
+        let clip = Rect::from_min_max(
+            egui::pos2(x, top),
+            egui::pos2(names.right() - 8.0, top + ROW_H),
+        )
+        .intersect(names);
         let p = np.with_clip_rect(clip);
-        p.galley(egui::pos2(x, name_y - galley.size().y / 2.0), galley, pal.text);
+        p.galley(
+            egui::pos2(x, name_y - galley.size().y / 2.0),
+            galley,
+            pal.text,
+        );
         if has_title {
             let pos = egui::pos2(x, top + ROW_H / 2.0 + 9.0);
-            p.text(pos, egui::Align2::LEFT_CENTER, &row.title, FontId::proportional(12.0), pal.muted);
+            p.text(
+                pos,
+                egui::Align2::LEFT_CENTER,
+                &row.title,
+                FontId::proportional(12.0),
+                pal.muted,
+            );
         }
         np.hline(names.x_range(), top + ROW_H, line);
     }
 
     // Corner and dividers.
-    let corner = Rect::from_min_max(outer.min, egui::pos2(outer.left() + NAME_W, outer.top() + HEAD_H));
+    let corner = Rect::from_min_max(
+        outer.min,
+        egui::pos2(outer.left() + NAME_W, outer.top() + HEAD_H),
+    );
     let p = ui.painter();
     p.text(
         egui::pos2(corner.left() + 16.0, corner.center().y),
@@ -413,7 +579,11 @@ fn cell(
     view: &CellView,
 ) -> Option<GridAction> {
     let clickable = !matches!(view, CellView::Unassigned) || editing;
-    let sense = if clickable { Sense::click() } else { Sense::hover() };
+    let sense = if clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let builder = UiBuilder::new()
         .max_rect(rect.shrink2(Vec2::new(8.0, 6.0)))
         .id_salt(("cell", &row.id, &test.0))
@@ -423,13 +593,23 @@ fn cell(
     let resp = ui
         .scope_builder(builder, |ui| {
             if clickable && ui.response().contains_pointer() {
-                ui.painter().rect_filled(ui.max_rect().expand(3.0), CornerRadius::same(8), pal.sidebar);
+                ui.painter().rect_filled(
+                    ui.max_rect().expand(3.0),
+                    CornerRadius::same(8),
+                    pal.sidebar,
+                );
             }
             ui.spacing_mut().item_spacing.y = 3.0;
             match view {
-                CellView::Due { info, status, delayed } => {
+                CellView::Due {
+                    info,
+                    status,
+                    delayed,
+                } => {
                     pill_clicked = due_pill(ui, pal, info, *status, *delayed).clicked();
-                    let stage = RichText::new(&info.next_stage_label).size(11.5).color(pal.muted);
+                    let stage = RichText::new(&info.next_stage_label)
+                        .size(11.5)
+                        .color(pal.muted);
                     ui.add(Label::new(stage).selectable(false).truncate());
                 }
                 CellView::Na => {
@@ -451,7 +631,9 @@ fn cell(
     if let CellView::Unassigned = view {
         let mut assign = false;
         Popup::menu(&resp).show(|ui| {
-            ui.label(RichText::new(format!("{} isn't assigned {}", row.name, test.1)).color(pal.muted));
+            ui.label(
+                RichText::new(format!("{} isn't assigned {}", row.name, test.1)).color(pal.muted),
+            );
             assign = ui.button(format!("{}  Assign", icon::PLUS)).clicked();
         });
         return assign.then(|| GridAction::Assign(row.id.clone(), test.0.clone()));

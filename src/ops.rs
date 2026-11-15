@@ -47,16 +47,23 @@ fn log(d: &mut Data, a: &Actor, action: &str, detail: String, refs: &[(&str, &st
         by: a.user.clone(),
         action: action.into(),
         detail,
-        refs: refs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>(),
+        refs: refs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<BTreeMap<_, _>>(),
     });
 }
 
 fn staff_name(d: &Data, id: &str) -> Res<String> {
-    d.staff(id).map(|s| s.name.clone()).ok_or(OpError::NotFound("staff"))
+    d.staff(id)
+        .map(|s| s.name.clone())
+        .ok_or(OpError::NotFound("staff"))
 }
 
 fn test_info(d: &Data, id: &str) -> Res<(String, String)> {
-    d.test(id).map(|(s, t)| (s.id.clone(), t.name.clone())).ok_or(OpError::NotFound("test"))
+    d.test(id)
+        .map(|(s, t)| (s.id.clone(), t.name.clone()))
+        .ok_or(OpError::NotFound("test"))
 }
 
 fn non_empty(s: &str) -> Res<String> {
@@ -99,13 +106,21 @@ pub fn add_completion(
         imported: false,
         unconfirmed: false,
     });
-    d.due_overrides.retain(|o| !(o.staff_id == staff_id && o.test_id == test_id));
+    d.due_overrides
+        .retain(|o| !(o.staff_id == staff_id && o.test_id == test_id));
     log(
         d,
         a,
         "record.add",
-        format!("Marked {test_name} {label} complete for {name} on {}", fmt_date(completed_on)),
-        &[("staff_id", staff_id), ("test_id", test_id), ("section_id", &section_id)],
+        format!(
+            "Marked {test_name} {label} complete for {name} on {}",
+            fmt_date(completed_on)
+        ),
+        &[
+            ("staff_id", staff_id),
+            ("test_id", test_id),
+            ("section_id", &section_id),
+        ],
     );
     Ok(id)
 }
@@ -121,12 +136,26 @@ pub fn edit_record(
     if completed_on > a.today() {
         return Err(OpError::FutureDate);
     }
-    let rec = d.records.iter().find(|r| r.id == record_id).ok_or(OpError::NotFound("record"))?;
+    let rec = d
+        .records
+        .iter()
+        .find(|r| r.id == record_id)
+        .ok_or(OpError::NotFound("record"))?;
     let (staff_id, test_id) = (rec.staff_id.clone(), rec.test_id.clone());
-    let name = d.staff(&staff_id).map(|s| s.name.clone()).unwrap_or_default();
-    let (section_id, test_name) = d.test(&test_id).map(|(s, t)| (s.id.clone(), t.name.clone())).unwrap_or_default();
+    let name = d
+        .staff(&staff_id)
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let (section_id, test_name) = d
+        .test(&test_id)
+        .map(|(s, t)| (s.id.clone(), t.name.clone()))
+        .unwrap_or_default();
     let label = stage_label(d.rule_for_test(&test_id), stage_index);
-    let rec = d.records.iter_mut().find(|r| r.id == record_id).expect("checked above");
+    let rec = d
+        .records
+        .iter_mut()
+        .find(|r| r.id == record_id)
+        .expect("checked above");
     rec.completed_on = completed_on;
     rec.stage_index = stage_index;
     rec.stage_label = label.clone();
@@ -135,18 +164,34 @@ pub fn edit_record(
         d,
         a,
         "record.edit",
-        format!("Edited {test_name} {label} for {name}: completed {}", fmt_date(completed_on)),
-        &[("staff_id", &staff_id), ("test_id", &test_id), ("section_id", &section_id)],
+        format!(
+            "Edited {test_name} {label} for {name}: completed {}",
+            fmt_date(completed_on)
+        ),
+        &[
+            ("staff_id", &staff_id),
+            ("test_id", &test_id),
+            ("section_id", &section_id),
+        ],
     );
     Ok(())
 }
 
 pub fn delete_record(d: &mut Data, a: &Actor, record_id: &str) -> Res {
-    let pos = d.records.iter().position(|r| r.id == record_id).ok_or(OpError::NotFound("record"))?;
+    let pos = d
+        .records
+        .iter()
+        .position(|r| r.id == record_id)
+        .ok_or(OpError::NotFound("record"))?;
     let rec = d.records.remove(pos);
-    let name = d.staff(&rec.staff_id).map(|s| s.name.clone()).unwrap_or_default();
-    let (section_id, test_name) =
-        d.test(&rec.test_id).map(|(s, t)| (s.id.clone(), t.name.clone())).unwrap_or_default();
+    let name = d
+        .staff(&rec.staff_id)
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let (section_id, test_name) = d
+        .test(&rec.test_id)
+        .map(|(s, t)| (s.id.clone(), t.name.clone()))
+        .unwrap_or_default();
     log(
         d,
         a,
@@ -156,7 +201,11 @@ pub fn delete_record(d: &mut Data, a: &Actor, record_id: &str) -> Res {
             rec.stage_label,
             fmt_date(rec.completed_on)
         ),
-        &[("staff_id", &rec.staff_id), ("test_id", &rec.test_id), ("section_id", &section_id)],
+        &[
+            ("staff_id", &rec.staff_id),
+            ("test_id", &rec.test_id),
+            ("section_id", &section_id),
+        ],
     );
     Ok(())
 }
@@ -165,13 +214,23 @@ pub fn delete_record(d: &mut Data, a: &Actor, record_id: &str) -> Res {
 /// nothing changes, nothing is audited. Returns the number of records confirmed.
 pub fn confirm_records(d: &mut Data, a: &Actor, ids: &[Id]) -> Res<usize> {
     let mut n = 0;
-    for r in d.records.iter_mut().filter(|r| r.unconfirmed && ids.contains(&r.id)) {
+    for r in d
+        .records
+        .iter_mut()
+        .filter(|r| r.unconfirmed && ids.contains(&r.id))
+    {
         r.unconfirmed = false;
         n += 1;
     }
     if n > 0 {
         let s = if n == 1 { "" } else { "s" };
-        log(d, a, "record.confirm", format!("Confirmed {n} imported record{s}"), &[]);
+        log(
+            d,
+            a,
+            "record.confirm",
+            format!("Confirmed {n} imported record{s}"),
+            &[],
+        );
     }
     Ok(n)
 }
@@ -203,21 +262,45 @@ pub fn add_delay_note(
     if let Some(e) = expected_on {
         detail.push_str(&format!(" (expected {})", fmt_date(e)));
     }
-    log(d, a, "delay.add", detail, &[("staff_id", staff_id), ("test_id", test_id), ("section_id", &section_id)]);
+    log(
+        d,
+        a,
+        "delay.add",
+        detail,
+        &[
+            ("staff_id", staff_id),
+            ("test_id", test_id),
+            ("section_id", &section_id),
+        ],
+    );
     Ok(id)
 }
 
 pub fn delete_delay_note(d: &mut Data, a: &Actor, id: &str) -> Res {
-    let pos = d.delay_notes.iter().position(|n| n.id == id).ok_or(OpError::NotFound("delay note"))?;
+    let pos = d
+        .delay_notes
+        .iter()
+        .position(|n| n.id == id)
+        .ok_or(OpError::NotFound("delay note"))?;
     let n = d.delay_notes.remove(pos);
-    let name = d.staff(&n.staff_id).map(|s| s.name.clone()).unwrap_or_default();
-    let (section_id, test_name) = d.test(&n.test_id).map(|(s, t)| (s.id.clone(), t.name.clone())).unwrap_or_default();
+    let name = d
+        .staff(&n.staff_id)
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+    let (section_id, test_name) = d
+        .test(&n.test_id)
+        .map(|(s, t)| (s.id.clone(), t.name.clone()))
+        .unwrap_or_default();
     log(
         d,
         a,
         "delay.delete",
         format!("Deleted delay note for {name}, {test_name}"),
-        &[("staff_id", &n.staff_id), ("test_id", &n.test_id), ("section_id", &section_id)],
+        &[
+            ("staff_id", &n.staff_id),
+            ("test_id", &n.test_id),
+            ("section_id", &section_id),
+        ],
     );
     Ok(())
 }
@@ -233,7 +316,9 @@ pub fn set_skipped(
     let name = staff_name(d, staff_id)?;
     let (section_id, test_name) = test_info(d, test_id)?;
     let label = stage_label(d.rule_for_test(test_id), stage_index);
-    d.skipped.retain(|s| !(s.staff_id == staff_id && s.test_id == test_id && s.stage_index == stage_index));
+    d.skipped.retain(|s| {
+        !(s.staff_id == staff_id && s.test_id == test_id && s.stage_index == stage_index)
+    });
     if skipped {
         d.skipped.push(Skipped {
             staff_id: staff_id.into(),
@@ -243,13 +328,21 @@ pub fn set_skipped(
             at: a.now,
         });
     }
-    let (action, verb) = if skipped { ("stage.skip", "Skipped") } else { ("stage.unskip", "Restored") };
+    let (action, verb) = if skipped {
+        ("stage.skip", "Skipped")
+    } else {
+        ("stage.unskip", "Restored")
+    };
     log(
         d,
         a,
         action,
         format!("{verb} {test_name} {label} for {name}"),
-        &[("staff_id", staff_id), ("test_id", test_id), ("section_id", &section_id)],
+        &[
+            ("staff_id", staff_id),
+            ("test_id", test_id),
+            ("section_id", &section_id),
+        ],
     );
     Ok(())
 }
@@ -263,7 +356,8 @@ pub fn set_due_override(
 ) -> Res {
     let name = staff_name(d, staff_id)?;
     let (section_id, test_name) = test_info(d, test_id)?;
-    d.due_overrides.retain(|o| !(o.staff_id == staff_id && o.test_id == test_id));
+    d.due_overrides
+        .retain(|o| !(o.staff_id == staff_id && o.test_id == test_id));
     let detail = match due_on {
         Some(due) => {
             d.due_overrides.push(DueOverride {
@@ -278,13 +372,29 @@ pub fn set_due_override(
         }
         None => format!("Removed {test_name} due date override for {name}"),
     };
-    log(d, a, "due.override", detail, &[("staff_id", staff_id), ("test_id", test_id), ("section_id", &section_id)]);
+    log(
+        d,
+        a,
+        "due.override",
+        detail,
+        &[
+            ("staff_id", staff_id),
+            ("test_id", test_id),
+            ("section_id", &section_id),
+        ],
+    );
     Ok(())
 }
 
 // ---------------------------------------------------------------------- staff
 
-pub fn add_staff(d: &mut Data, a: &Actor, name: &str, title: &str, joined: Option<NaiveDate>) -> Res<Id> {
+pub fn add_staff(
+    d: &mut Data,
+    a: &Actor,
+    name: &str,
+    title: &str,
+    joined: Option<NaiveDate>,
+) -> Res<Id> {
     let name = non_empty(name)?;
     let id = new_id("p");
     d.staff.push(Staff {
@@ -295,7 +405,13 @@ pub fn add_staff(d: &mut Data, a: &Actor, name: &str, title: &str, joined: Optio
         status: StaffStatus::Active,
         assignments: BTreeMap::new(),
     });
-    log(d, a, "staff.add", format!("Added {name} to personnel"), &[("staff_id", &id)]);
+    log(
+        d,
+        a,
+        "staff.add",
+        format!("Added {name} to personnel"),
+        &[("staff_id", &id)],
+    );
     Ok(id)
 }
 
@@ -330,7 +446,13 @@ pub fn set_staff_status(d: &mut Data, a: &Actor, id: &str, status: StaffStatus) 
         StaffStatus::Hidden => "hidden",
         StaffStatus::Removed => "removed",
     };
-    log(d, a, "staff.status", format!("Set {name} to {word}"), &[("staff_id", id)]);
+    log(
+        d,
+        a,
+        "staff.status",
+        format!("Set {name} to {word}"),
+        &[("staff_id", id)],
+    );
     Ok(())
 }
 
@@ -349,7 +471,13 @@ pub fn delete_staff_permanently(d: &mut Data, a: &Actor, id: &str, confirm_text:
     d.due_overrides.retain(|r| r.staff_id != id);
     d.delay_notes.retain(|r| r.staff_id != id);
     d.notes.retain(|r| r.staff_id != id);
-    log(d, a, "staff.delete", format!("Permanently deleted {name} and all their records"), &[("staff_id", id)]);
+    log(
+        d,
+        a,
+        "staff.delete",
+        format!("Permanently deleted {name} and all their records"),
+        &[("staff_id", id)],
+    );
     Ok(())
 }
 
@@ -367,7 +495,13 @@ pub fn set_assignment(
     let detail = match state {
         Some(st) => {
             if s.assignments.get(test_id).map(|x| x.state) != Some(st) {
-                s.assignments.insert(test_id.into(), Assignment { state: st, since: today });
+                s.assignments.insert(
+                    test_id.into(),
+                    Assignment {
+                        state: st,
+                        since: today,
+                    },
+                );
             }
             match st {
                 AssignState::Assigned => format!("Assigned {test_name} to {name}"),
@@ -379,21 +513,48 @@ pub fn set_assignment(
             format!("Removed {test_name} assignment for {name}")
         }
     };
-    log(d, a, "assignment.set", detail, &[("staff_id", staff_id), ("test_id", test_id), ("section_id", &section_id)]);
+    log(
+        d,
+        a,
+        "assignment.set",
+        detail,
+        &[
+            ("staff_id", staff_id),
+            ("test_id", test_id),
+            ("section_id", &section_id),
+        ],
+    );
     Ok(())
 }
 
-pub fn assign_section(d: &mut Data, a: &Actor, staff_id: &str, section_id: &str, assigned: bool) -> Res {
+pub fn assign_section(
+    d: &mut Data,
+    a: &Actor,
+    staff_id: &str,
+    section_id: &str,
+    assigned: bool,
+) -> Res {
     let name = staff_name(d, staff_id)?;
     let sec = d.section(section_id).ok_or(OpError::NotFound("section"))?;
     let sec_name = sec.name.clone();
-    let test_ids: Vec<Id> = sec.tests.iter().filter(|t| !t.retired).map(|t| t.id.clone()).collect();
+    let test_ids: Vec<Id> = sec
+        .tests
+        .iter()
+        .filter(|t| !t.retired)
+        .map(|t| t.id.clone())
+        .collect();
     let today = a.today();
     let s = d.staff_mut(staff_id).expect("checked above");
     for t in &test_ids {
         if assigned {
             if s.assignments.get(t).map(|x| x.state) != Some(AssignState::Assigned) {
-                s.assignments.insert(t.clone(), Assignment { state: AssignState::Assigned, since: today });
+                s.assignments.insert(
+                    t.clone(),
+                    Assignment {
+                        state: AssignState::Assigned,
+                        since: today,
+                    },
+                );
             }
         } else {
             s.assignments.remove(t);
@@ -404,7 +565,13 @@ pub fn assign_section(d: &mut Data, a: &Actor, staff_id: &str, section_id: &str,
     } else {
         format!("Removed all {sec_name} test assignments for {name}")
     };
-    log(d, a, "assignment.set", detail, &[("staff_id", staff_id), ("section_id", section_id)]);
+    log(
+        d,
+        a,
+        "assignment.set",
+        detail,
+        &[("staff_id", staff_id), ("section_id", section_id)],
+    );
     Ok(())
 }
 
@@ -414,16 +581,38 @@ pub fn add_section(d: &mut Data, a: &Actor, name: &str) -> Res<Id> {
     let name = non_empty(name)?;
     let id = new_id("s");
     let order = d.sections.iter().map(|s| s.order + 1).max().unwrap_or(0);
-    d.sections.push(Section { id: id.clone(), name: name.clone(), order, retired: false, tests: vec![] });
-    log(d, a, "section.add", format!("Added section {name}"), &[("section_id", &id)]);
+    d.sections.push(Section {
+        id: id.clone(),
+        name: name.clone(),
+        order,
+        retired: false,
+        tests: vec![],
+    });
+    log(
+        d,
+        a,
+        "section.add",
+        format!("Added section {name}"),
+        &[("section_id", &id)],
+    );
     Ok(id)
 }
 
 pub fn rename_section(d: &mut Data, a: &Actor, id: &str, name: &str) -> Res {
     let name = non_empty(name)?;
-    let s = d.sections.iter_mut().find(|s| s.id == id).ok_or(OpError::NotFound("section"))?;
+    let s = d
+        .sections
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or(OpError::NotFound("section"))?;
     let old = std::mem::replace(&mut s.name, name.clone());
-    log(d, a, "section.rename", format!("Renamed section {old} to {name}"), &[("section_id", id)]);
+    log(
+        d,
+        a,
+        "section.rename",
+        format!("Renamed section {old} to {name}"),
+        &[("section_id", id)],
+    );
     Ok(())
 }
 
@@ -445,25 +634,48 @@ pub fn move_section(d: &mut Data, a: &Actor, id: &str, delta: i32) -> Res {
     let moved = ids.remove(from);
     ids.insert(to, moved);
     for (i, sid) in ids.iter().enumerate() {
-        d.sections.iter_mut().find(|s| &s.id == sid).expect("id from list").order = i as u32;
+        d.sections
+            .iter_mut()
+            .find(|s| &s.id == sid)
+            .expect("id from list")
+            .order = i as u32;
     }
     let name = d.section(id).expect("checked above").name.clone();
-    log(d, a, "section.move", format!("Moved section {name} to position {}", to + 1), &[("section_id", id)]);
+    log(
+        d,
+        a,
+        "section.move",
+        format!("Moved section {name} to position {}", to + 1),
+        &[("section_id", id)],
+    );
     Ok(())
 }
 
 pub fn set_section_retired(d: &mut Data, a: &Actor, id: &str, retired: bool) -> Res {
-    let s = d.sections.iter_mut().find(|s| s.id == id).ok_or(OpError::NotFound("section"))?;
+    let s = d
+        .sections
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or(OpError::NotFound("section"))?;
     s.retired = retired;
     let name = s.name.clone();
     let verb = if retired { "Retired" } else { "Restored" };
-    log(d, a, "section.retire", format!("{verb} section {name}"), &[("section_id", id)]);
+    log(
+        d,
+        a,
+        "section.retire",
+        format!("{verb} section {name}"),
+        &[("section_id", id)],
+    );
     Ok(())
 }
 
 pub fn delete_section(d: &mut Data, a: &Actor, id: &str) -> Res {
     let sec = d.section(id).ok_or(OpError::NotFound("section"))?;
-    if d.records.iter().any(|r| sec.tests.iter().any(|t| t.id == r.test_id)) {
+    if d.records
+        .iter()
+        .any(|r| sec.tests.iter().any(|t| t.id == r.test_id))
+    {
         return Err(OpError::HasRecords);
     }
     let name = sec.name.clone();
@@ -475,9 +687,19 @@ pub fn delete_section(d: &mut Data, a: &Actor, id: &str) -> Res {
     // Keep order values contiguous.
     let ids: Vec<Id> = d.sections_sorted().iter().map(|s| s.id.clone()).collect();
     for (i, sid) in ids.iter().enumerate() {
-        d.sections.iter_mut().find(|s| &s.id == sid).expect("id from list").order = i as u32;
+        d.sections
+            .iter_mut()
+            .find(|s| &s.id == sid)
+            .expect("id from list")
+            .order = i as u32;
     }
-    log(d, a, "section.delete", format!("Deleted section {name}"), &[("section_id", id)]);
+    log(
+        d,
+        a,
+        "section.delete",
+        format!("Deleted section {name}"),
+        &[("section_id", id)],
+    );
     Ok(())
 }
 
@@ -504,9 +726,19 @@ fn test_mut<'a>(d: &'a mut Data, id: &str) -> Res<&'a mut TestSystem> {
 pub fn add_test(d: &mut Data, a: &Actor, section_id: &str, name: &str) -> Res<Id> {
     let name = non_empty(name)?;
     let id = new_id("t");
-    let sec = d.sections.iter_mut().find(|s| s.id == section_id).ok_or(OpError::NotFound("section"))?;
+    let sec = d
+        .sections
+        .iter_mut()
+        .find(|s| s.id == section_id)
+        .ok_or(OpError::NotFound("section"))?;
     let order = sec.tests.iter().map(|t| t.order + 1).max().unwrap_or(0);
-    sec.tests.push(TestSystem { id: id.clone(), name: name.clone(), order, retired: false, rule_id: None });
+    sec.tests.push(TestSystem {
+        id: id.clone(),
+        name: name.clone(),
+        order,
+        retired: false,
+        rule_id: None,
+    });
     let sec_name = sec.name.clone();
     log(
         d,
@@ -534,13 +766,20 @@ pub fn rename_test(d: &mut Data, a: &Actor, test_id: &str, name: &str) -> Res {
 
 pub fn move_test(d: &mut Data, a: &Actor, test_id: &str, delta: i32) -> Res {
     let (section_id, name) = test_info(d, test_id)?;
-    let sec = d.sections.iter_mut().find(|s| s.id == section_id).expect("test's section");
+    let sec = d
+        .sections
+        .iter_mut()
+        .find(|s| s.id == section_id)
+        .expect("test's section");
     let mut ids: Vec<Id> = {
         let mut v: Vec<&TestSystem> = sec.tests.iter().collect();
         v.sort_by_key(|t| t.order);
         v.iter().map(|t| t.id.clone()).collect()
     };
-    let from = ids.iter().position(|x| x == test_id).expect("test in section");
+    let from = ids
+        .iter()
+        .position(|x| x == test_id)
+        .expect("test in section");
     let to = clamped(from, delta, ids.len());
     if to == from {
         return Ok(());
@@ -548,7 +787,11 @@ pub fn move_test(d: &mut Data, a: &Actor, test_id: &str, delta: i32) -> Res {
     let moved = ids.remove(from);
     ids.insert(to, moved);
     for (i, tid) in ids.iter().enumerate() {
-        sec.tests.iter_mut().find(|t| &t.id == tid).expect("id from list").order = i as u32;
+        sec.tests
+            .iter_mut()
+            .find(|t| &t.id == tid)
+            .expect("id from list")
+            .order = i as u32;
     }
     log(
         d,
@@ -596,7 +839,12 @@ pub fn delete_test(d: &mut Data, a: &Actor, test_id: &str) -> Res {
 pub fn set_test_rule(d: &mut Data, a: &Actor, test_id: &str, rule_id: Option<Id>) -> Res {
     let (section_id, name) = test_info(d, test_id)?;
     let rule_name = match &rule_id {
-        Some(r) => d.rules.iter().find(|x| &x.id == r).map(|x| x.name.clone()).ok_or(OpError::NotFound("rule"))?,
+        Some(r) => d
+            .rules
+            .iter()
+            .find(|x| &x.id == r)
+            .map(|x| x.name.clone())
+            .ok_or(OpError::NotFound("rule"))?,
         None => "the default rule".into(),
     };
     test_mut(d, test_id)?.rule_id = rule_id;
@@ -615,22 +863,40 @@ pub fn set_test_rule(d: &mut Data, a: &Actor, test_id: &str, rule_id: Option<Id>
 pub fn add_rule(d: &mut Data, a: &Actor, name: &str, stages: Vec<Stage>) -> Res<Id> {
     let name = non_empty(name)?;
     let id = new_id("r");
-    d.rules.push(Rule { id: id.clone(), name: name.clone(), stages });
+    d.rules.push(Rule {
+        id: id.clone(),
+        name: name.clone(),
+        stages,
+    });
     log(d, a, "rule.add", format!("Added schedule rule {name}"), &[]);
     Ok(id)
 }
 
 pub fn update_rule(d: &mut Data, a: &Actor, id: &str, name: &str, stages: Vec<Stage>) -> Res {
     let name = non_empty(name)?;
-    let r = d.rules.iter_mut().find(|r| r.id == id).ok_or(OpError::NotFound("rule"))?;
+    let r = d
+        .rules
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or(OpError::NotFound("rule"))?;
     r.name = name.clone();
     r.stages = stages;
-    log(d, a, "rule.update", format!("Updated schedule rule {name}"), &[]);
+    log(
+        d,
+        a,
+        "rule.update",
+        format!("Updated schedule rule {name}"),
+        &[],
+    );
     Ok(())
 }
 
 pub fn delete_rule(d: &mut Data, a: &Actor, id: &str) -> Res {
-    let r = d.rules.iter().find(|r| r.id == id).ok_or(OpError::NotFound("rule"))?;
+    let r = d
+        .rules
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or(OpError::NotFound("rule"))?;
     if id == d.default_rule_id {
         return Err(OpError::IsDefaultRule);
     }
@@ -641,7 +907,13 @@ pub fn delete_rule(d: &mut Data, a: &Actor, id: &str) -> Res {
             t.rule_id = None;
         }
     }
-    log(d, a, "rule.delete", format!("Deleted schedule rule {name}"), &[]);
+    log(
+        d,
+        a,
+        "rule.delete",
+        format!("Deleted schedule rule {name}"),
+        &[],
+    );
     Ok(())
 }
 
@@ -652,7 +924,10 @@ pub fn update_settings(d: &mut Data, a: &Actor, s: Settings) -> Res {
     let o = d.settings.clone();
     let mut changes = vec![];
     if o.due_soon_days != s.due_soon_days {
-        changes.push(format!("due soon days {} to {}", o.due_soon_days, s.due_soon_days));
+        changes.push(format!(
+            "due soon days {} to {}",
+            o.due_soon_days, s.due_soon_days
+        ));
     }
     if o.variance_tolerance_days != s.variance_tolerance_days {
         changes.push(format!(
@@ -661,13 +936,24 @@ pub fn update_settings(d: &mut Data, a: &Actor, s: Settings) -> Res {
         ));
     }
     if o.inactivity_minutes != s.inactivity_minutes {
-        changes.push(format!("inactivity minutes {} to {}", o.inactivity_minutes, s.inactivity_minutes));
+        changes.push(format!(
+            "inactivity minutes {} to {}",
+            o.inactivity_minutes, s.inactivity_minutes
+        ));
     }
     if o.initial_due_days != s.initial_due_days {
-        changes.push(format!("initial due days {} to {}", opt(o.initial_due_days), opt(s.initial_due_days)));
+        changes.push(format!(
+            "initial due days {} to {}",
+            opt(o.initial_due_days),
+            opt(s.initial_due_days)
+        ));
     }
     if o.archive_after_days != s.archive_after_days {
-        changes.push(format!("archive after days {} to {}", opt(o.archive_after_days), opt(s.archive_after_days)));
+        changes.push(format!(
+            "archive after days {} to {}",
+            opt(o.archive_after_days),
+            opt(s.archive_after_days)
+        ));
     }
     let detail = if changes.is_empty() {
         "Saved settings (no changes)".to_string()
@@ -687,7 +973,10 @@ mod tests {
     fn actor() -> Actor {
         Actor {
             user: "jtan".into(),
-            now: chrono::FixedOffset::east_opt(8 * 3600).unwrap().with_ymd_and_hms(2026, 11, 14, 9, 30, 0).unwrap(),
+            now: chrono::FixedOffset::east_opt(8 * 3600)
+                .unwrap()
+                .with_ymd_and_hms(2026, 11, 14, 9, 30, 0)
+                .unwrap(),
         }
     }
 
@@ -721,7 +1010,10 @@ mod tests {
         assert_eq!(e.refs["staff_id"], st);
         assert_eq!(e.refs["test_id"], t1);
         assert_eq!(e.refs["section_id"], sec);
-        assert_eq!(e.detail, "Marked Cell-DYN Ruby Initial complete for Agnes on 12 Oct 2026");
+        assert_eq!(
+            e.detail,
+            "Marked Cell-DYN Ruby Initial complete for Agnes on 12 Oct 2026"
+        );
     }
 
     #[test]
@@ -753,14 +1045,29 @@ mod tests {
         let (mut d, _, t1, _, st) = fixture();
         let a = actor();
         let id = add_completion(&mut d, &a, &st, &t1, 0, day(2026, 10, 1), "").unwrap();
-        assert_eq!(edit_record(&mut d, &a, &id, day(2026, 12, 1), 1, ""), Err(OpError::FutureDate));
+        assert_eq!(
+            edit_record(&mut d, &a, &id, day(2026, 12, 1), 1, ""),
+            Err(OpError::FutureDate)
+        );
         edit_record(&mut d, &a, &id, day(2026, 10, 2), 1, "fixed").unwrap();
         let r = &d.records[0];
-        assert_eq!((r.stage_index, r.stage_label.as_str(), r.comment.as_str()), (1, "Semi-annual", "fixed"));
+        assert_eq!(
+            (r.stage_index, r.stage_label.as_str(), r.comment.as_str()),
+            (1, "Semi-annual", "fixed")
+        );
         delete_record(&mut d, &a, &id).unwrap();
         assert!(d.records.is_empty());
-        assert_eq!(d.audit.iter().map(|e| e.action.as_str()).collect::<Vec<_>>(), ["record.add", "record.edit", "record.delete"]);
-        assert_eq!(delete_record(&mut d, &a, &id), Err(OpError::NotFound("record")));
+        assert_eq!(
+            d.audit
+                .iter()
+                .map(|e| e.action.as_str())
+                .collect::<Vec<_>>(),
+            ["record.add", "record.edit", "record.delete"]
+        );
+        assert_eq!(
+            delete_record(&mut d, &a, &id),
+            Err(OpError::NotFound("record"))
+        );
         assert_eq!(d.audit.len(), 3);
     }
 
@@ -772,13 +1079,24 @@ mod tests {
         add_delay_note(&mut d, &a, &st, &t1, 1, "sick", None).unwrap();
         set_skipped(&mut d, &a, &st, &t1, 1, true).unwrap();
         let n = d.audit.len();
-        assert_eq!(delete_staff_permanently(&mut d, &a, &st, "Agnes"), Err(OpError::NotRemoved));
+        assert_eq!(
+            delete_staff_permanently(&mut d, &a, &st, "Agnes"),
+            Err(OpError::NotRemoved)
+        );
         set_staff_status(&mut d, &a, &st, StaffStatus::Removed).unwrap();
         let n = n + 1;
-        assert_eq!(delete_staff_permanently(&mut d, &a, &st, "Bob"), Err(OpError::ConfirmMismatch));
+        assert_eq!(
+            delete_staff_permanently(&mut d, &a, &st, "Bob"),
+            Err(OpError::ConfirmMismatch)
+        );
         assert_eq!(d.audit.len(), n);
         delete_staff_permanently(&mut d, &a, &st, "  Agnes ").unwrap();
-        assert!(d.staff.is_empty() && d.records.is_empty() && d.delay_notes.is_empty() && d.skipped.is_empty());
+        assert!(
+            d.staff.is_empty()
+                && d.records.is_empty()
+                && d.delay_notes.is_empty()
+                && d.skipped.is_empty()
+        );
         assert_eq!(d.audit.len(), n + 1);
         assert_eq!(d.audit.last().unwrap().action, "staff.delete");
     }
@@ -815,11 +1133,20 @@ mod tests {
         let a = actor();
         let mut d = Data::new_empty("jtan", a.now);
         d.sections.clear();
-        let ids: Vec<Id> = ["A", "B", "C"].iter().map(|n| add_section(&mut d, &a, n).unwrap()).collect();
+        let ids: Vec<Id> = ["A", "B", "C"]
+            .iter()
+            .map(|n| add_section(&mut d, &a, n).unwrap())
+            .collect();
         move_section(&mut d, &a, &ids[1], -1).unwrap();
         let sorted = d.sections_sorted();
-        assert_eq!(sorted.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["B", "A", "C"]);
-        assert_eq!(sorted.iter().map(|s| s.order).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(
+            sorted.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["B", "A", "C"]
+        );
+        assert_eq!(
+            sorted.iter().map(|s| s.order).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
         let n = d.audit.len();
         move_section(&mut d, &a, &ids[1], -5).unwrap(); // already first: clamped no-op
         assert_eq!(d.audit.len(), n);
@@ -846,7 +1173,10 @@ mod tests {
         let r = add_rule(&mut d, &a, "Quarterly", vec![]).unwrap();
         set_test_rule(&mut d, &a, &t1, Some(r.clone())).unwrap();
         set_test_rule(&mut d, &a, &t2, Some(r.clone())).unwrap();
-        assert_eq!(set_test_rule(&mut d, &a, &t2, Some("r-nope".into())), Err(OpError::NotFound("rule")));
+        assert_eq!(
+            set_test_rule(&mut d, &a, &t2, Some("r-nope".into())),
+            Err(OpError::NotFound("rule"))
+        );
         delete_rule(&mut d, &a, &r).unwrap();
         assert!(d.sections[0].tests.iter().all(|t| t.rule_id.is_none()));
         assert_eq!(d.rules.len(), 1);
@@ -864,7 +1194,13 @@ mod tests {
         assign_section(&mut d, &a, &st, &sec, true).unwrap();
         let asg = &d.staff[0].assignments;
         assert_eq!(asg.len(), 1);
-        assert_eq!(asg[&t1], Assignment { state: AssignState::Assigned, since: day(2026, 11, 14) });
+        assert_eq!(
+            asg[&t1],
+            Assignment {
+                state: AssignState::Assigned,
+                since: day(2026, 11, 14)
+            }
+        );
         assign_section(&mut d, &a, &st, &sec, false).unwrap();
         assert!(d.staff[0].assignments.is_empty());
     }
@@ -879,7 +1215,10 @@ mod tests {
             r.unconfirmed = true;
         }
         let n = d.audit.len();
-        assert_eq!(confirm_records(&mut d, &a, &[r1.clone(), r2.clone()]).unwrap(), 2);
+        assert_eq!(
+            confirm_records(&mut d, &a, &[r1.clone(), r2.clone()]).unwrap(),
+            2
+        );
         assert!(d.records.iter().all(|r| !r.unconfirmed));
         assert_eq!(d.audit.len(), n + 1);
         assert_eq!(d.audit.last().unwrap().action, "record.confirm");
@@ -889,7 +1228,10 @@ mod tests {
     fn empty_name_rejected_and_untouched() {
         let (mut d, sec, _, _, _) = fixture();
         let a = actor();
-        assert_eq!(add_staff(&mut d, &a, "  ", "", None), Err(OpError::EmptyName));
+        assert_eq!(
+            add_staff(&mut d, &a, "  ", "", None),
+            Err(OpError::EmptyName)
+        );
         assert_eq!(add_section(&mut d, &a, ""), Err(OpError::EmptyName));
         assert_eq!(add_test(&mut d, &a, &sec, " "), Err(OpError::EmptyName));
         assert!(d.audit.is_empty());
@@ -903,13 +1245,25 @@ mod tests {
         assert_eq!(d.skipped.len(), 1);
         set_skipped(&mut d, &a, &st, &t1, 1, false).unwrap();
         assert!(d.skipped.is_empty());
-        let nid = add_delay_note(&mut d, &a, &st, &t1, 1, "waiting", Some(day(2027, 1, 5))).unwrap();
+        let nid =
+            add_delay_note(&mut d, &a, &st, &t1, 1, "waiting", Some(day(2027, 1, 5))).unwrap();
         delete_delay_note(&mut d, &a, &nid).unwrap();
         let actions: Vec<_> = d.audit.iter().map(|e| e.action.as_str()).collect();
-        assert_eq!(actions, ["stage.skip", "stage.unskip", "delay.add", "delay.delete"]);
-        let s = Settings { due_soon_days: 45, ..Settings::default() };
+        assert_eq!(
+            actions,
+            ["stage.skip", "stage.unskip", "delay.add", "delay.delete"]
+        );
+        let s = Settings {
+            due_soon_days: 45,
+            ..Settings::default()
+        };
         update_settings(&mut d, &a, s).unwrap();
-        assert!(d.audit.last().unwrap().detail.contains("due soon days 30 to 45"));
+        assert!(d
+            .audit
+            .last()
+            .unwrap()
+            .detail
+            .contains("due soon days 30 to 45"));
         assert_eq!(d.settings.due_soon_days, 45);
     }
 }
