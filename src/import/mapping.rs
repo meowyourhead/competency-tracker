@@ -158,7 +158,8 @@ pub fn propose_merges(sheets: &[RawSheet]) -> Vec<MergeGroup> {
     by_root.values().map(|m| group_of(m)).collect()
 }
 
-/// Every member of `groups[idx]` becomes its own group.
+/// Every member of `groups[idx]` becomes its own group, named after that
+/// member's own raw name (whitespace collapsed), not the old group's name.
 ///
 /// `MergeGroup` keeps no per-member joined date or title, so each split group
 /// inherits the original group's. The review UI MUST let the user edit each

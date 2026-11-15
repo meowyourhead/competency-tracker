@@ -467,6 +467,21 @@ mod tests {
     }
 
     #[test]
+    fn split_of_differently_named_members_leaves_next_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(&dir);
+        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Shawn (Weixiang)", "MT"), sheet("Serology", " Weixiang ", "MT")]);
+        h.run();
+        button(&h, "Split").click();
+        h.run();
+        let names: Vec<&str> = h.state().wizard.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["Shawn (Weixiang)", "Weixiang"]);
+        assert!(!button(&h, "Next").accesskit_node().is_disabled());
+        import_now(&mut h);
+        assert_eq!(h.state().session.data().staff.len(), 2);
+    }
+
+    #[test]
     fn blank_name_disables_next() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(&dir);
