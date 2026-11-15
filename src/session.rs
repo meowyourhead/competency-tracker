@@ -62,6 +62,10 @@ pub struct Session {
     /// `data` is `Data::new_empty` and was never loaded or edited: any loaded
     /// snapshot replaces it, whatever its `saved_at`.
     placeholder: bool,
+    /// `saved_at` of the snapshot our data builds on (loaded or last saved).
+    /// Every save is stamped later than it, whatever this PC's clock says.
+    /// `None` until anything was loaded or saved.
+    base_saved_at: Option<Ts>,
     mode: Mode,
     revision: u64,
     dirty: bool,
@@ -216,6 +220,7 @@ impl Session {
             me,
             data: Data::new_empty(user, now),
             placeholder: true,
+            base_saved_at: None,
             mode: Mode::Viewing { holder: None },
             revision: 0,
             dirty: false,
@@ -419,11 +424,14 @@ impl Session {
             Ok(false) => return Err(self.lose_lock(now)),
             Err(e) => return Err(self.save_failed(now, format!("Could not check the edit lock: {e}"))),
         }
-        // Stamped for the write; restored if it fails.
-        let prev_at = std::mem::replace(&mut self.data.saved_at, now);
+        // Stamped for the write; restored if it fails. Never older than the
+        // data we build on, so a PC with a slow clock still saves the newest.
+        let stamp = self.base_saved_at.map_or(now, |base| now.max(base + chrono::Duration::milliseconds(1)));
+        let prev_at = std::mem::replace(&mut self.data.saved_at, stamp);
         let prev_by = std::mem::replace(&mut self.data.saved_by, self.me.user.clone());
         match snapshot::save_snapshot(&self.dir, &self.data, &self.file_name(now)) {
             Ok(path) => {
+                self.base_saved_at = Some(stamp);
                 self.dirty = false;
                 self.dirty_since = None;
                 self.placeholder = false;
@@ -600,6 +608,7 @@ impl Session {
     }
 
     fn adopt(&mut self, loaded: Loaded) {
+        self.base_saved_at = Some(loaded.data.saved_at);
         self.data = loaded.data;
         self.corrupt = loaded.corrupt;
         self.newer_schema = loaded.read_only_newer_schema;
@@ -1426,6 +1435,40 @@ mod tests {
         change(&mut s, t0());
         assert!(s.save_now(at(5)).is_err());
         assert_eq!(s.data().saved_at, before);
+    }
+
+    #[test]
+    fn save_over_a_future_stamped_snapshot_still_wins() {
+        let (_t, dir, clock) = setup();
+        dir.ensure().unwrap();
+        // Saved by a PC whose clock runs a day fast.
+        let future = t0() + chrono::Duration::days(1);
+        save_snapshot(&dir, &Data::new_empty("agnes", future), "15 Nov 2026 - agnes.json").unwrap();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        assert!(s.is_editing());
+        change(&mut s, at(1));
+        s.save_now(at(1)).unwrap();
+        let loaded = load_latest(&dir).unwrap().unwrap();
+        assert_eq!(loaded.data.saved_by, "jtan", "our save must be the newest snapshot");
+        assert_eq!(loaded.data.settings.due_soon_days, 45);
+        assert_eq!(loaded.data.saved_at, future + chrono::Duration::milliseconds(1));
+        // The next save stays ahead of our own last stamp too.
+        change(&mut s, at(2));
+        s.save_now(at(2)).unwrap();
+        assert_eq!(load_latest(&dir).unwrap().unwrap().data.saved_at, future + chrono::Duration::milliseconds(2));
+    }
+
+    #[test]
+    fn replace_data_save_stays_ahead_of_the_loaded_snapshot() {
+        let (_t, dir, clock) = setup();
+        dir.ensure().unwrap();
+        let future = t0() + chrono::Duration::days(1);
+        save_snapshot(&dir, &Data::new_empty("agnes", future), "15 Nov 2026 - agnes.json").unwrap();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.replace_data(at(1), with_staff("Ann")).unwrap();
+        let loaded = load_latest(&dir).unwrap().unwrap();
+        assert_eq!(loaded.data.staff[0].name, "Ann");
+        assert!(loaded.data.saved_at > future);
     }
 
     #[test]
