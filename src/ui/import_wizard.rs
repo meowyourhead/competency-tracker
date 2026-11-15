@@ -92,6 +92,8 @@ impl ImportWizard {
         let mut data = plan.data.clone();
         let mut report = plan.report.clone();
         carry_over(&mut data, &mut report, cx.session.data());
+        // `Ok` means replaced: a failed save is retried by the session and
+        // shown on the Done step, so the import is never run twice.
         if let Err(e) = cx.session.replace_data(cx.now, data) {
             self.error = Some(if cx.session.is_editing() { e } else { "Editing ended, so nothing was imported.".to_owned() });
             return;
@@ -281,6 +283,9 @@ fn done(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) -> bool {
     card(ui, pal, |ui| {
         ui.label(RichText::new(format!("Imported {staff} staff and {records} records.")).family(medium()).size(15.5).color(pal.text));
         ui.add_space(6.0);
+        if cx.session.save_error().is_some() {
+            ui.label(RichText::new("Imported, but not saved yet \u{2014} the app keeps retrying").color(pal.yellow_fg));
+        }
         for warning in &w.warnings {
             ui.label(RichText::new(warning).color(pal.yellow_fg));
         }
@@ -415,6 +420,29 @@ mod tests {
         button(&h, "Review unconfirmed (0)").click();
         h.run();
         assert!(h.state().review);
+    }
+
+    #[test]
+    fn import_with_a_failed_save_is_done_but_says_not_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(&dir);
+        // Today's snapshot cannot be written: a folder is in its place.
+        let name = crate::snapshot::snapshot_file_name(now_ts().date_naive(), "tester");
+        let target = dir.path().join("CompetencyData").join("snapshots").join(name);
+        std::fs::create_dir_all(&target).unwrap();
+        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.run();
+        import_now(&mut h);
+        assert!(h.state().wizard.error.is_none());
+        assert_eq!(h.state().session.data().staff.len(), 1);
+        assert!(h.state().session.save_error().is_some());
+        h.get_by_label("Imported, but not saved yet \u{2014} the app keeps retrying");
+        assert!(dir.path().join("CompetencyData").join("import-report.txt").exists());
+        // Once the save goes through, the note goes away.
+        std::fs::remove_dir(&target).unwrap();
+        h.state_mut().session.save_now(now_ts()).unwrap();
+        h.run();
+        assert!(h.query_by_label("Imported, but not saved yet \u{2014} the app keeps retrying").is_none());
     }
 
     #[test]

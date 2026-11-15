@@ -340,11 +340,13 @@ impl Session {
     }
 
     /// Replaces all data (import) and saves immediately. Editing only.
-    /// Returns true when the data was replaced and saved; a failed save is
-    /// retried by `tick` as usual.
+    /// `Ok` once the data is replaced: a failed save shows in `save_error`
+    /// and is retried by `tick` as usual. `Err` when nothing was replaced
+    /// (not editing, or the backup failed), or when the save found the lock
+    /// taken over (the data then went to the conflicts folder).
     pub fn replace_data(&mut self, now: Ts, data: Data) -> Result<(), String> {
         if !self.is_editing() {
-            return Err("Not in edit mode".into());
+            return Err("Editing ended, so nothing was imported.".into());
         }
         // The day's snapshot name is per user, so a same-day import would
         // overwrite it: keep the current data in the archive first.
@@ -356,7 +358,10 @@ impl Session {
         }
         self.data = data;
         self.mark_dirty(now);
-        self.save_now(now).map(|_| ())
+        match self.save_now(now) {
+            Err(msg) if !self.is_editing() => Err(msg),
+            _ => Ok(()),
+        }
     }
 
     pub fn tick(&mut self, now: Ts, inst: Instant) -> Vec<SessionEvent> {
@@ -1250,6 +1255,39 @@ mod tests {
         s.replace_data(at(2), with_staff("Bea")).unwrap();
         assert_eq!(archived_names(&dir), vec![vec!["Ann".to_string()]]);
         assert_eq!(s.data().staff[0].name, "Bea");
+    }
+
+    #[test]
+    fn replace_data_is_ok_once_replaced_even_if_the_save_fails() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.replace_data(at(1), with_staff("Ann")).unwrap();
+        // Today's snapshot cannot be written (a folder is in its place).
+        let target = dir.snapshots().join(FILE);
+        fs::remove_file(&target).unwrap();
+        fs::create_dir(&target).unwrap();
+        s.replace_data(at(2), with_staff("Bea")).expect("replaced, so Ok; the save is retried");
+        assert_eq!(s.data().staff[0].name, "Bea");
+        assert!(s.save_error().is_some(), "the banner shows the failed save");
+        assert!(s.is_editing());
+        assert_eq!(archived_names(&dir), vec![vec!["Ann".to_string()]], "one backup");
+        // The usual retry saves it; no second import, no second backup.
+        fs::remove_dir(&target).unwrap();
+        let ev = s.tick(at(12), clock.at(12));
+        assert!(ev.contains(&SessionEvent::Saved), "{ev:?}");
+        assert!(s.save_error().is_none());
+        assert_eq!(load_latest(&dir).unwrap().unwrap().data.staff[0].name, "Bea");
+        assert_eq!(archived_names(&dir).len(), 1);
+    }
+
+    #[test]
+    fn replace_data_errs_when_the_lock_was_lost() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        write_lock(&dir, &other("agnes", "PC2", 9, t0()));
+        assert!(s.replace_data(at(1), with_staff("Ann")).is_err());
+        assert!(!s.is_editing());
+        assert_eq!(files_in(&dir.conflicts()).len(), 1, "the import went to the conflicts folder");
     }
 
     #[test]
