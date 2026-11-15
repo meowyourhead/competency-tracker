@@ -45,6 +45,8 @@ pub(crate) struct ImportWizard {
     done: Option<(usize, usize, usize)>,
     /// Set once `import-report.txt` was written.
     report_path: Option<PathBuf>,
+    /// The report's warnings, shown on the Done step.
+    warnings: Vec<String>,
 }
 
 impl ImportWizard {
@@ -88,18 +90,19 @@ impl ImportWizard {
         let Some(plan) = &self.plan else { return };
         // Settings, the default rule and the audit history survive a re-import.
         let mut data = plan.data.clone();
-        carry_over(&mut data, cx.session.data());
+        let mut report = plan.report.clone();
+        carry_over(&mut data, &mut report, cx.session.data());
         if let Err(e) = cx.session.replace_data(cx.now, data) {
             self.error = Some(if cx.session.is_editing() { e } else { "Editing ended, so nothing was imported.".to_owned() });
             return;
         }
-        let report = &plan.report;
         let path = cx.session.data_dir().import_report();
         match std::fs::write(&path, report.to_text()) {
             Ok(()) => self.report_path = Some(path),
             Err(e) => cx.toasts.push(Toast::new(format!("Couldn't write the import report: {e}"))),
         }
         self.done = Some((report.staff, report.records, report.unconfirmed));
+        self.warnings = report.warnings;
         self.error = None;
         self.step = WizardStep::Done;
     }
@@ -278,6 +281,9 @@ fn done(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) -> bool {
     card(ui, pal, |ui| {
         ui.label(RichText::new(format!("Imported {staff} staff and {records} records.")).family(medium()).size(15.5).color(pal.text));
         ui.add_space(6.0);
+        for warning in &w.warnings {
+            ui.label(RichText::new(warning).color(pal.yellow_fg));
+        }
         if w.report_path.is_none() {
             ui.label(RichText::new("The import report could not be saved.").color(pal.yellow_fg));
         }

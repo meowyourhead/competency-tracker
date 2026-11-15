@@ -6,7 +6,7 @@ use crate::dates::fmt_date;
 use crate::import::excel::{Cell, RawBlock, RawSheet, SHEETS};
 use crate::model::{
     new_id, AssignState, Assignment, AuditEntry, Data, DueOverride, Id, Note, OverrideSource, Record, Section,
-    Skipped, Staff, StaffStatus, TestSystem, Ts,
+    Skipped, Stage, Staff, StaffStatus, TestSystem, Ts,
 };
 use crate::schedule::{next_due, stage_label, PairState};
 
@@ -212,6 +212,8 @@ pub struct ImportReport {
     pub removed: Vec<String>,
     /// "person – section" unassigned by a remark or cell.
     pub unassigned: Vec<String>,
+    /// Things the user should know about the import as a whole.
+    pub warnings: Vec<String>,
 }
 
 impl ImportReport {
@@ -228,6 +230,9 @@ impl ImportReport {
         ];
         for (label, n) in counts {
             s += &format!("{label}: {n}\r\n");
+        }
+        for w in &self.warnings {
+            s += &format!("\r\nNote: {w}\r\n");
         }
         let lists = [
             ("Excel due dates used (later than calculated)", &self.excel_overrides),
@@ -259,14 +264,32 @@ pub struct ImportPlan {
     pub report: ImportReport,
 }
 
+pub const SCHEDULE_DIFFERS: &str =
+    "Your current schedule differs from the standard one; imported records use the standard schedule.";
+
+/// Same number of stages with the same intervals and repeat/numbering flags
+/// (labels may differ), so records built for one fit the other.
+fn same_shape(a: &[Stage], b: &[Stage]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.interval_months == y.interval_months && x.repeats == y.repeats && x.ordinal == y.ordinal
+        })
+}
+
 /// Keeps what an import must not reset: the settings, the default rule's
 /// stages and the whole audit history (placed before the import's own entry).
-pub fn carry_over(plan: &mut Data, current: &Data) {
+/// The current stages are only kept when they have the same shape as the ones
+/// the import was built with; otherwise the import's stay and `report` says so.
+pub fn carry_over(plan: &mut Data, report: &mut ImportReport, current: &Data) {
     plan.settings = current.settings.clone();
-    let wanted = current.rules.iter().find(|r| r.id == current.default_rule_id).map(|r| r.stages.clone());
+    let wanted = current.rules.iter().find(|r| r.id == current.default_rule_id).map(|r| &r.stages);
     let own = plan.default_rule_id.clone();
     if let (Some(stages), Some(rule)) = (wanted, plan.rules.iter_mut().find(|r| r.id == own)) {
-        rule.stages = stages;
+        if same_shape(stages, &rule.stages) {
+            rule.stages = stages.clone();
+        } else {
+            report.warnings.push(SCHEDULE_DIFFERS.to_owned());
+        }
     }
     let mut audit = current.audit.clone();
     audit.append(&mut plan.audit);
@@ -1039,25 +1062,62 @@ mod tests {
         v
     }
 
+    fn default_stages(d: &Data) -> Vec<crate::model::Stage> {
+        d.rules.iter().find(|r| r.id == d.default_rule_id).unwrap().stages.clone()
+    }
+
+    fn default_stages_mut(d: &mut Data) -> &mut Vec<crate::model::Stage> {
+        let rid = d.default_rule_id.clone();
+        &mut d.rules.iter_mut().find(|r| r.id == rid).unwrap().stages
+    }
+
     #[test]
     fn carry_over_keeps_settings_rule_and_audit() {
         let mut plan = run(&[one_test("Hematology", true, vec![block1(4, "A", [date(2025, 1, 10, true), empty(), empty(), empty()])])]).data;
         let mut current = plan.clone();
         current.settings.due_soon_days = 45;
         current.settings.initial_due_days = Some(14);
-        let rid = current.default_rule_id.clone();
-        current.rules.iter_mut().find(|r| r.id == rid).unwrap().stages.truncate(1);
+        // Same shape, renamed stages: carried over.
+        default_stages_mut(&mut current)[1].label = "Six-monthly".into();
         let old = AuditEntry { at: now(), by: "agnes".into(), action: "staff.add".into(), detail: "old".into(), refs: Default::default() };
         current.audit = vec![old.clone()];
         assert_eq!(plan.audit.len(), 1);
 
-        carry_over(&mut plan, &current);
+        let mut report = ImportReport::default();
+        carry_over(&mut plan, &mut report, &current);
         assert_eq!(plan.settings, current.settings);
-        let stages = |d: &Data| d.rules.iter().find(|r| r.id == d.default_rule_id).unwrap().stages.clone();
-        assert_eq!(stages(&plan), stages(&current));
+        assert_eq!(default_stages(&plan), default_stages(&current));
+        assert!(report.warnings.is_empty());
         assert_eq!(plan.audit.len(), 2);
         assert_eq!(plan.audit[0], old);
         assert_eq!(plan.audit[1].action, "import.excel");
+    }
+
+    #[test]
+    fn carry_over_keeps_the_standard_schedule_when_the_current_one_differs() {
+        let base = run(&[one_test("Hematology", true, vec![block1(4, "A", [date(2025, 1, 10, true), empty(), empty(), empty()])])]).data;
+        let standard = default_stages(&base);
+        let changes: [fn(&mut Vec<crate::model::Stage>); 4] = [
+            |s| s.truncate(1),
+            |s| s[1].interval_months = Some(3),
+            |s| s[2].repeats = false,
+            |s| s[2].ordinal = false,
+        ];
+        for change in changes {
+            let mut plan = base.clone();
+            let mut current = base.clone();
+            current.settings.due_soon_days = 45;
+            change(default_stages_mut(&mut current));
+            let mut report = ImportReport::default();
+            carry_over(&mut plan, &mut report, &current);
+            assert_eq!(default_stages(&plan), standard, "imported records keep the schedule they were built with");
+            assert_eq!(plan.settings.due_soon_days, 45, "settings still carried");
+            assert_eq!(
+                report.warnings,
+                ["Your current schedule differs from the standard one; imported records use the standard schedule."]
+            );
+            assert!(report.to_text().contains("Your current schedule differs from the standard one"));
+        }
     }
 
     #[test]
