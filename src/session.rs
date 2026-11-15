@@ -473,11 +473,15 @@ impl Session {
         }
         if self.dirty || !self.saved_this_session {
             if let Err(msg) = self.save_now(now) {
-                if self.is_editing() || self.unrescued {
+                if self.unrescued || (self.dirty && self.is_editing()) {
                     return Err(msg);
                 }
-                // Lost the lock but the edits were exported to conflicts.
-                return Ok(());
+                if !self.is_editing() {
+                    // Lost the lock; any edits were exported to conflicts.
+                    return Ok(());
+                }
+                // Nothing unsaved: the save was only for the named file.
+                self.clear_save_failure();
             }
         }
         self.stop_heartbeat();
@@ -714,6 +718,11 @@ impl Session {
         snapshot::snapshot_file_name(now.date_naive(), &self.me.user)
     }
 
+    fn clear_save_failure(&mut self) {
+        self.failed_at = None;
+        self.save_error = None;
+    }
+
     fn save_failed(&mut self, now: Ts, msg: String) -> String {
         self.failed_at = Some(now);
         self.save_error = Some(msg.clone());
@@ -774,7 +783,15 @@ impl Session {
     fn leave(&mut self, now: Ts, reason: LeaveReason) -> io::Result<()> {
         if self.dirty || !self.saved_this_session {
             if let Err(msg) = self.save_now(now) {
-                return if self.is_editing() || self.unrescued { Err(io::Error::other(msg)) } else { Ok(()) };
+                if self.unrescued || (self.dirty && self.is_editing()) {
+                    return Err(io::Error::other(msg));
+                }
+                if !self.is_editing() {
+                    // Lost the lock; any edits were exported to conflicts.
+                    return Ok(());
+                }
+                // Nothing unsaved: the save was only for the named file.
+                self.clear_save_failure();
             }
         }
         self.stop_heartbeat();
@@ -1380,6 +1397,29 @@ mod tests {
         assert_eq!(rescued.settings.due_soon_days, 45);
         assert!(!dir.lock_path().exists());
         assert!(!s.is_editing());
+    }
+
+    #[test]
+    fn clean_exit_with_failed_save_still_releases_and_closes() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        block_dir(&dir.snapshots());
+        // Nothing unsaved: a failed save must not block the close or offer a rescue.
+        assert_eq!(s.on_exit(at(1)), Ok(()));
+        assert!(!s.is_editing());
+        assert!(!dir.lock_path().exists());
+    }
+
+    #[test]
+    fn clean_stop_editing_with_failed_save_still_releases() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        block_dir(&dir.snapshots());
+        s.stop_editing(at(1)).unwrap();
+        assert_eq!(s.mode(), &Mode::Viewing { holder: None });
+        assert!(!dir.lock_path().exists());
+        assert!(s.save_error().is_none(), "no banner for a save nothing needed");
+        assert!(s.tick(at(2), clock.at(2)).contains(&SessionEvent::LeftEditMode(LeaveReason::Manual)));
     }
 
     #[test]

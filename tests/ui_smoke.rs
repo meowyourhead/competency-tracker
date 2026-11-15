@@ -48,8 +48,9 @@ fn viewer_banner_when_lock_held() {
 #[test]
 fn failed_save_on_close_cancels_and_offers_retry() {
     let dir = tempfile::tempdir().unwrap();
-    let s = session(&dir, 1);
+    let mut s = session(&dir, 1);
     assert!(s.is_editing());
+    s.mutate(now_ts(), |d, _| d.settings.due_soon_days = 45).unwrap();
     let mut h = harness(TrackerApp::new_for_test(s));
     // Make saving impossible: replace the snapshots folder with a file.
     let snaps = dir.path().join("CompetencyData").join("snapshots");
@@ -65,6 +66,22 @@ fn failed_save_on_close_cancels_and_offers_retry() {
     h.get_by_label("Retry");
     h.get_by_label("Quit anyway");
     assert!(h.state().session().is_editing(), "edits and lock are kept until the user decides");
+}
+
+#[test]
+fn failed_save_on_close_with_nothing_unsaved_just_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = session(&dir, 1);
+    assert!(s.is_editing());
+    let mut h = harness(TrackerApp::new_for_test(s));
+    let snaps = dir.path().join("CompetencyData").join("snapshots");
+    std::fs::remove_dir_all(&snaps).unwrap();
+    std::fs::write(&snaps, b"not a folder").unwrap();
+
+    close_window(&mut h);
+    assert!(!root_commands(&h).iter().any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+    assert!(!h.state().session().is_editing());
+    assert!(!dir.path().join("CompetencyData").join("edit.lock").exists(), "lock released");
 }
 
 fn close_window(h: &mut Harness<'static, TrackerApp>) {

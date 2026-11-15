@@ -169,7 +169,7 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, filter: &mut DueFilter
 }
 
 /// The non-retired tests of `section`, or of every non-retired section
-/// (labelled "test Â· section") when none is chosen.
+/// (labelled "test · section") when none is chosen.
 fn test_options(data: &Data, section: Option<&str>) -> Vec<(Id, String)> {
     let mut out = Vec::new();
     for sec in data.sections_sorted().into_iter().filter(|s| !s.retired) {
@@ -254,7 +254,7 @@ fn cards(ui: &mut egui::Ui, pal: &Palette, groups: Vec<(Id, Vec<&DueItem>)>, by:
 }
 
 /// A clickable row: primary text, muted details, and the due pill on the
-/// right. Its accessible name is "staff Â· test". Returns true when clicked.
+/// right. Its accessible name is "staff · test". Returns true when clicked.
 fn due_row(ui: &mut egui::Ui, pal: &Palette, item: &DueItem, primary: &str, secondary: &str) -> bool {
     let mut pill_clicked = false;
     let builder = UiBuilder::new().id_salt((&item.staff_id, &item.test_id)).sense(Sense::click());

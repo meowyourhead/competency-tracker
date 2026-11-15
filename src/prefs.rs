@@ -11,7 +11,9 @@ pub enum Theme {
     Dark,
 }
 
+/// Missing fields take their defaults, so prefs from another version still load.
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[serde(default)]
 pub struct Prefs {
     pub theme: Theme,
     pub sidebar_collapsed: bool,
@@ -67,6 +69,17 @@ mod tests {
         std::fs::write(&bad, "{not json").unwrap();
         let p = load_prefs_from(&bad);
         assert_eq!(p.theme, Theme::Light);
+        assert!(!p.sidebar_collapsed);
+    }
+
+    #[test]
+    fn load_prefs_keeps_known_fields_when_others_are_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        // Written by a version that had fewer settings.
+        std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
+        let p = load_prefs_from(&path);
+        assert_eq!(p.theme, Theme::Dark);
         assert!(!p.sidebar_collapsed);
     }
 
