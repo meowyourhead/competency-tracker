@@ -3,7 +3,6 @@
 
 use chrono::NaiveDate;
 use egui::{Align, Button, ComboBox, Frame, Key, Layout, Margin, RichText, ScrollArea, TextEdit};
-use egui_extras::DatePickerButton;
 use egui_phosphor::regular as icon;
 
 use crate::dates::fmt_date;
@@ -13,7 +12,7 @@ use crate::query::{history, split_history, HistoryEntry, HISTORY_DEFAULT};
 use crate::schedule::{classify, completion_variance, next_due, stage_label, variance_tag, DueInfo, DueSource, PairState};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{heading, medium, Palette};
-use crate::ui::widgets::{due_pill, icon_button};
+use crate::ui::widgets::{date_picker, due_pill, icon_button};
 
 #[derive(Default)]
 pub(crate) enum DetailForm {
@@ -347,16 +346,6 @@ fn date_stage_comment(
         });
     });
     ui.add(TextEdit::multiline(comment).hint_text("Comment (optional)").desired_rows(2).desired_width(f32::INFINITY));
-}
-
-/// egui_extras' date picker (which works on `jiff` dates) for a chrono date.
-fn date_picker(ui: &mut egui::Ui, date: &mut NaiveDate, salt: &str) {
-    use chrono::Datelike;
-    let Ok(mut d) = jiff::civil::Date::new(date.year() as i16, date.month() as i8, date.day() as i8) else { return };
-    ui.add(DatePickerButton::new(&mut d).id_salt(salt).format("%-d %b %Y").calendar_week(false));
-    if let Some(back) = NaiveDate::from_ymd_opt(d.year().into(), d.month() as u32, d.day() as u32) {
-        *date = back;
-    }
 }
 
 fn card<R>(ui: &mut egui::Ui, pal: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {

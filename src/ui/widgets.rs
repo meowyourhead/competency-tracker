@@ -109,6 +109,16 @@ pub fn chip_select<T: PartialEq + Clone>(ui: &mut Ui, label: &str, current: &mut
     changed
 }
 
+/// egui_extras' date picker (which works on `jiff` dates) for a chrono date.
+pub fn date_picker(ui: &mut Ui, date: &mut chrono::NaiveDate, salt: &str) {
+    use chrono::Datelike;
+    let Ok(mut d) = jiff::civil::Date::new(date.year() as i16, date.month() as i8, date.day() as i8) else { return };
+    ui.add(egui_extras::DatePickerButton::new(&mut d).id_salt(salt).format("%-d %b %Y").calendar_week(false));
+    if let Some(back) = chrono::NaiveDate::from_ymd_opt(d.year().into(), d.month() as u32, d.day() as u32) {
+        *date = back;
+    }
+}
+
 /// A single-line search field with a magnifying-glass hint.
 pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str) -> egui::Response {
     ui.add(

@@ -529,6 +529,99 @@ fn wheel_over_names_scrolls_grid() {
     assert!(h.query_by_label("P39 \u{b7} Cobas").is_some(), "the grid scrolled to the bottom");
 }
 
+fn go_personnel(h: &mut Harness<'static, TrackerApp>) {
+    button(h, "Personnel").click();
+    h.run();
+}
+
+fn status_of(h: &Harness<'static, TrackerApp>, id: &str) -> Option<StaffStatus> {
+    h.state().session().data().staff.iter().find(|s| s.id == id).map(|s| s.status)
+}
+
+#[test]
+fn hide_staff_removes_from_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    h.get_by_label("Agnes");
+    go_personnel(&mut h);
+    button(&h, "Actions for Agnes").click();
+    h.run();
+    button(&h, "Hide").click();
+    h.run();
+    assert_eq!(status_of(&h, "p-agnes"), Some(StaffStatus::Hidden));
+    button(&h, "Summary").click();
+    h.run();
+    assert!(h.query_by_label("Agnes").is_none(), "hidden staff vanish from the summary");
+    h.get_by_label("Everyone is up to date");
+}
+
+#[test]
+fn permanent_delete_requires_typed_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    go_personnel(&mut h);
+    button(&h, "Actions for Bram").click();
+    h.run();
+    assert!(!has_button(&h, "Delete permanently"), "only offered for removed staff");
+    button(&h, "Remove").click();
+    h.run();
+    assert_eq!(status_of(&h, "p-bram"), Some(StaffStatus::Removed));
+    button(&h, "Removed").click();
+    h.run();
+    button(&h, "Actions for Bram").click();
+    h.run();
+    button(&h, "Delete permanently").click();
+    h.run();
+    h.get_by_label("Type Bram to confirm");
+    assert!(button(&h, "Delete").accesskit_node().is_disabled());
+    h.event(egui::Event::Text("Bra".into()));
+    h.run();
+    assert!(button(&h, "Delete").accesskit_node().is_disabled(), "partial name does not unlock");
+    h.event(egui::Event::Text("m".into()));
+    h.run();
+    assert!(!button(&h, "Delete").accesskit_node().is_disabled());
+    button(&h, "Delete").click();
+    h.run();
+    assert_eq!(status_of(&h, "p-bram"), None);
+    assert!(h.state().session().data().records.iter().all(|r| r.staff_id != "p-bram"));
+}
+
+#[test]
+fn add_staff_with_whole_section_assigned() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    go_personnel(&mut h);
+    h.get_by_label_contains("Add staff").click();
+    h.run();
+    h.event(egui::Event::Text("Dana".into()));
+    h.run();
+    h.query_all_by_label("Assign whole section").next().expect("a section with tests").click();
+    h.run();
+    button(&h, "Save").click();
+    h.run();
+    let data = h.state().session().data();
+    let dana = data.staff.iter().find(|s| s.name == "Dana").expect("added");
+    assert_eq!(dana.assignments.len(), 2, "both Chemistry tests assigned");
+    assert!(dana.assignments.values().all(|a| a.state == AssignState::Assigned));
+    assert!(!has_button(&h, "Save"), "editor closed");
+}
+
+#[test]
+fn profile_opens_detail_for_a_test() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    go_personnel(&mut h);
+    h.get_by_label("Agnes").click();
+    h.run();
+    h.get_by_label("\u{2190} All staff");
+    h.get_by_label("Cobas").click();
+    h.run();
+    h.get_by_label("Close panel");
+    h.get_by_label("\u{2190} All staff").click();
+    h.run();
+    h.get_by_label("Bram");
+}
+
 /// The Summary page's search box (the last text input in the tree).
 fn summary_search<'a>(h: &'a Harness<'static, TrackerApp>) -> egui_kittest::Node<'a> {
     h.query_all_by_role(egui::accesskit::Role::TextInput).last().expect("search box")

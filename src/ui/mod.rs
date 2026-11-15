@@ -11,4 +11,5 @@ mod overlays;
 mod personnel;
 mod sections;
 mod settings;
+mod staff_editor;
 mod summary;
