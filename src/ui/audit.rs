@@ -11,7 +11,7 @@ use crate::query::{distinct_audit_users, filter_audit, AuditFilter};
 use crate::session::Session;
 use crate::ui::app::Ctx;
 use crate::ui::theme::Palette;
-use crate::ui::widgets::{chip_select, date_picker, empty_state, search_box};
+use crate::ui::widgets::{chip_select, date_picker, empty_state, search_box, SEARCH_W};
 
 /// Height of one list row (two lines of text).
 const ROW_H: f32 = 44.0;
@@ -136,8 +136,6 @@ fn row(ui: &mut egui::Ui, pal: &Palette, e: &AuditEntry) {
 }
 
 fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, f: &mut AuditFilter, today: NaiveDate) {
-    search_box(ui, &mut f.text, "Search descriptions");
-    ui.add_space(4.0);
     let users: Vec<(String, String)> = distinct_audit_users(data)
         .into_iter()
         .map(|u| (u.clone(), u))
@@ -158,6 +156,7 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, f: &mut AuditFilter, t
         .map(|(l, p)| ((*p).to_owned(), (*l).to_owned()))
         .collect();
     ui.horizontal_wrapped(|ui| {
+        search_box(ui, &mut f.text, "Search descriptions", SEARCH_W);
         chip_select(ui, "User", &mut f.user, &users);
         chip_select(ui, "Section", &mut f.section, &sections);
         chip_select(ui, "Staff", &mut f.staff, &staff);

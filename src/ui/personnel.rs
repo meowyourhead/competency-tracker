@@ -17,7 +17,9 @@ use crate::session::Session;
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::staff_editor::{self, StaffForm};
 use crate::ui::theme::{heading, medium, serif, Palette};
-use crate::ui::widgets::{chip_select, due_pill, empty_state, icon_button, search_box, segmented};
+use crate::ui::widgets::{
+    chip_select, due_pill, empty_state, icon_button, search_box, segmented, SEARCH_W,
+};
 
 #[derive(Default)]
 pub(crate) struct PersonnelState {
@@ -743,8 +745,6 @@ fn filters(
     editing: bool,
     add_staff: &mut bool,
 ) {
-    search_box(ui, &mut f.text, "Search by name");
-    ui.add_space(4.0);
     let sections: Vec<(Id, String)> = data
         .sections_sorted()
         .into_iter()
@@ -756,6 +756,7 @@ fn filters(
         .map(|t| (t.clone(), t))
         .collect();
     ui.horizontal(|ui| {
+        search_box(ui, &mut f.text, "Search by name", SEARCH_W);
         let tabs = [StaffStatus::Active, StaffStatus::Removed];
         let current = usize::from(f.status.unwrap_or(StaffStatus::Active) != StaffStatus::Active);
         if let Some(i) = segmented(ui, pal, current, &["Active", "Removed"]) {

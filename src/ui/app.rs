@@ -681,7 +681,7 @@ impl TrackerApp {
     }
 
     fn search_field(&mut self, ui: &mut egui::Ui, focus: bool) {
-        let resp = search_box(ui, &mut self.search, "Search  (Ctrl+K)");
+        let resp = search_box(ui, &mut self.search, "Search  (Ctrl+K)", f32::INFINITY);
         if focus {
             resp.request_focus();
         }

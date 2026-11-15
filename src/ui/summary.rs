@@ -17,7 +17,9 @@ use crate::schedule::DueStatus;
 use crate::session::Session;
 use crate::ui::app::Ctx;
 use crate::ui::theme::Palette;
-use crate::ui::widgets::{chip_select, due_pill, empty_state, search_box, segmented, stat_card};
+use crate::ui::widgets::{
+    chip_select, due_pill, empty_state, search_box, segmented, stat_card, SEARCH_W,
+};
 
 /// The page content is a calm centred column at most this wide.
 const MAX_WIDTH: f32 = 980.0;
@@ -173,8 +175,6 @@ fn filters(
     filter: &mut DueFilter,
     group: &mut Grouping,
 ) {
-    search_box(ui, &mut filter.text, "Search by name, test or section");
-    ui.add_space(4.0);
     let sections: Vec<(Id, String)> = data
         .sections_sorted()
         .into_iter()
@@ -186,6 +186,7 @@ fn filters(
         .map(|t| (t.clone(), t))
         .collect();
     ui.horizontal(|ui| {
+        search_box(ui, &mut filter.text, "Name, test or section", SEARCH_W);
         chip_select(ui, "Section", &mut filter.section, &sections);
         let tests = test_options(data, filter.section.as_deref());
         if filter

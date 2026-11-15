@@ -182,13 +182,18 @@ pub fn date_picker(ui: &mut Ui, date: &mut chrono::NaiveDate, salt: &str) {
     }
 }
 
-/// A single-line search field with a magnifying-glass hint.
-pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str) -> egui::Response {
+/// The width of a search field that sits in a filter row: room for a long
+/// name, not the whole page.
+pub const SEARCH_W: f32 = 220.0;
+
+/// A single-line search field with a magnifying-glass hint, `width` wide
+/// (`f32::INFINITY` fills the row).
+pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> egui::Response {
     ui.add(
         TextEdit::singleline(text)
             .hint_text(format!("{}  {hint}", icon::MAGNIFYING_GLASS))
             .margin(egui::vec2(10.0, 6.0))
-            .desired_width(f32::INFINITY),
+            .desired_width(width),
     )
 }
 
@@ -246,6 +251,13 @@ pub fn choice(
 /// Returns the index clicked this frame (also when already selected).
 pub fn segmented(ui: &mut Ui, pal: &Palette, current: usize, labels: &[&str]) -> Option<usize> {
     let mut picked = None;
+    // In a right-to-left row the labels would come out backwards.
+    let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
+    let order: Vec<usize> = if rtl {
+        (0..labels.len()).rev().collect()
+    } else {
+        (0..labels.len()).collect()
+    };
     egui::Frame::new()
         .fill(pal.sidebar)
         .stroke(Stroke::new(1.0, pal.border))
@@ -254,8 +266,8 @@ pub fn segmented(ui: &mut Ui, pal: &Palette, current: usize, labels: &[&str]) ->
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
-                for (i, label) in labels.iter().enumerate() {
-                    if choice(ui, pal, i == current, label, false).clicked() {
+                for &i in &order {
+                    if choice(ui, pal, i == current, labels[i], false).clicked() {
                         picked = Some(i);
                     }
                 }

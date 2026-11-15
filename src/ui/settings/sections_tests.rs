@@ -21,6 +21,11 @@ use crate::ui::app::Ctx;
 use crate::ui::theme::{medium, Palette};
 use crate::ui::widgets::icon_button;
 
+/// The width given to a section's or test system's name (and its "Retired"
+/// tag), so every row's buttons start in the same place, right beside it.
+const SECTION_SLOT: f32 = 200.0;
+const TEST_SLOT: f32 = 260.0;
+
 /// What a drag handle carries: the row, its place in its list, and the list
 /// (the sections, or one section's tests) it may be dropped back into.
 #[derive(Debug, Clone)]
@@ -333,46 +338,91 @@ fn item_row<R>(
             pal.accent.gamma_multiply(0.10),
         );
     }
-    let out = ui
-        .horizontal(|ui| {
-            drag_handle(ui, pal, editing, item);
-            // Sections lead with the expander; tests end with the rule dropdown.
-            let mut lead = Some(lead);
-            let mut out = None;
-            if is_section {
-                out = lead.take().map(|f| f(ui, st, act));
-            }
-            name_cell(ui, pal, editing, st, item, act);
-            if item.retired {
-                Frame::new()
-                    .fill(pal.grey_bg)
-                    .corner_radius(255)
-                    .inner_margin(Margin::symmetric(8, 2))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Retired").size(11.5).color(pal.grey_fg));
-                    });
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let delete = ui.add_enabled(editing && !item.has_records, Button::new("Delete"));
-                let why = if item.has_records {
-                    "Has records \u{2014} retire instead"
-                } else {
-                    "Start editing to make changes"
-                };
-                if delete.on_disabled_hover_text(why).clicked() {
-                    *act = Some(Act::AskDelete(item.target.clone()));
+    // Filled in once the row's size is known: the row lights up under the
+    // pointer, so its Retire and Delete buttons read as part of it.
+    let backdrop = ui.painter().add(egui::Shape::Noop);
+    let row = ui.horizontal(|ui| {
+        drag_handle(ui, pal, editing, item);
+        // Sections lead with the expander; tests follow the name with the
+        // rule dropdown. The name sits in a fixed slot so the buttons line up.
+        let mut lead = Some(lead);
+        let mut out = None;
+        if is_section {
+            out = lead.take().map(|f| f(ui, st, act));
+        }
+        let slot = if is_section { SECTION_SLOT } else { TEST_SLOT };
+        let h = ui.spacing().interact_size.y;
+        ui.allocate_ui_with_layout(
+            Vec2::new(slot, h),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_size(Vec2::new(slot, h));
+                let chip_w = if item.retired { 72.0 } else { 0.0 };
+                ui.scope(|ui| {
+                    ui.set_max_width(slot - chip_w);
+                    name_cell(ui, pal, editing, st, item, act);
+                });
+                if item.retired {
+                    Frame::new()
+                        .fill(pal.grey_bg)
+                        .corner_radius(255)
+                        .inner_margin(Margin::symmetric(8, 2))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Retired").size(11.5).color(pal.grey_fg));
+                        });
                 }
-                let retire = if item.retired { "Restore" } else { "Retire" };
-                if ui.add_enabled(editing, Button::new(retire)).clicked() {
-                    *act = Some(Act::Retire(item.target.clone(), !item.retired));
-                }
-                if let Some(f) = lead.take() {
-                    out = Some(f(ui, st, act));
-                }
-            });
-            out.expect("lead drawn once")
-        })
-        .inner;
+            },
+        );
+        if let Some(f) = lead.take() {
+            out = Some(f(ui, st, act));
+        }
+        let retire = if item.retired {
+            format!("{}  Restore", icon::ARROW_COUNTER_CLOCKWISE)
+        } else {
+            format!("{}  Retire", icon::ARCHIVE)
+        };
+        let what = if is_section { "section" } else { "test system" };
+        let retire_tip = if item.retired {
+            format!("Bring back {}", item.name)
+        } else {
+            format!("Hide {} but keep its records", item.name)
+        };
+        if ui
+            .add_enabled(editing, Button::new(retire))
+            .on_hover_text(retire_tip)
+            .on_disabled_hover_text("Start editing to make changes")
+            .clicked()
+        {
+            *act = Some(Act::Retire(item.target.clone(), !item.retired));
+        }
+        let enabled = editing && !item.has_records;
+        let color = if enabled { pal.red_fg } else { pal.muted };
+        let delete = ui.add_enabled(
+            enabled,
+            Button::new(RichText::new(format!("{}  Delete", icon::TRASH)).color(color)),
+        );
+        let why = if item.has_records {
+            format!("This {what} has records, so it can only be retired")
+        } else {
+            "Start editing to make changes".to_owned()
+        };
+        if delete
+            .on_hover_text(format!("Delete {} for good", item.name))
+            .on_disabled_hover_text(why)
+            .clicked()
+        {
+            *act = Some(Act::AskDelete(item.target.clone()));
+        }
+        out.expect("lead drawn once")
+    });
+    let lit = row.response.rect.expand2(Vec2::new(6.0, 2.0));
+    if !dragging && ui.rect_contains_pointer(lit) {
+        ui.painter().set(
+            backdrop,
+            egui::Shape::rect_filled(lit, 8, pal.sidebar.gamma_multiply(0.9)),
+        );
+    }
+    let out = row.inner;
     if st.confirm_delete.as_ref() == Some(&item.target) {
         ui.horizontal(|ui| {
             let what = if is_section { "section" } else { "test" };
@@ -420,7 +470,7 @@ fn name_cell(
         let resp = ui.add(
             TextEdit::singleline(&mut r.text)
                 .id(id)
-                .desired_width(240.0),
+                .desired_width(ui.available_width() - 8.0),
         );
         if r.fresh {
             r.fresh = false;
@@ -436,7 +486,9 @@ fn name_cell(
         return;
     }
     let color = if item.retired { pal.muted } else { pal.text };
-    let button = Button::new(RichText::new(item.name).family(font).color(color)).frame(false);
+    let button = Button::new(RichText::new(item.name).family(font).color(color))
+        .frame(false)
+        .wrap_mode(egui::TextWrapMode::Truncate);
     let resp = ui
         .add_enabled(editing, button)
         .on_hover_text("Click to rename");

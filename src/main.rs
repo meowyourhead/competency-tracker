@@ -57,6 +57,8 @@ fn options(renderer: eframe::Renderer) -> eframe::NativeOptions {
         .with_title(TITLE)
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([960.0, 600.0])
+        // Opens filling the screen; "Restore down" returns to the size above.
+        .with_maximized(true)
         // The app draws its own minimise / maximise / close buttons.
         .with_decorations(false)
         .with_resizable(true);

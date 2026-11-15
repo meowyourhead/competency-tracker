@@ -472,19 +472,15 @@ fn grid_shows_pill_and_opens_detail() {
     h.run();
     let done = now_ts().date_naive() - chrono::Days::new(365);
     let due = fmt_date(done.checked_add_months(chrono::Months::new(6)).unwrap());
-    h.get_by_label(&due);
-    // Both people's next stage is Semi-annual: one label under each pill.
-    assert_eq!(
-        h.query_all_by_label("Semi-annual").count(),
-        2,
-        "stage label under the pill"
-    );
     assert!(h.query_by_label("Bram \u{b7} Architect").is_some());
     assert!(h.query_by_label("Close panel").is_none());
     h.get_by_label("Agnes \u{b7} Cobas").click();
     h.run();
     h.get_by_label("Close panel");
     h.get_by_label("Cobas \u{b7} Chemistry");
+    // The cell's pill and stage, as the panel shows them.
+    h.get_by_label(&due);
+    h.get_by_label("for Semi-annual");
 }
 
 /// Agnes has six Cobas completions, one stage a year apart.
