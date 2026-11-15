@@ -69,7 +69,7 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Ctx, form: &mut StaffForm) -> b
         let heading = if form.id.is_some() { "Edit staff" } else { "Add staff" };
         ui.label(RichText::new(heading).family(serif()).size(20.0));
         ui.add_space(10.0);
-        fields(ui, form);
+        fields(ui, form, cx.today);
         ui.add_space(10.0);
         ui.label(RichText::new("Assignments").family(medium()));
         ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| assignments(ui, data, form));
@@ -100,7 +100,7 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Ctx, form: &mut StaffForm) -> b
     }
 }
 
-fn fields(ui: &mut egui::Ui, form: &mut StaffForm) {
+fn fields(ui: &mut egui::Ui, form: &mut StaffForm, today: NaiveDate) {
     ui.label("Name");
     let name = ui.add(TextEdit::singleline(&mut form.name).hint_text("Full name").desired_width(f32::INFINITY));
     if form.fresh {
@@ -122,7 +122,7 @@ fn fields(ui: &mut egui::Ui, form: &mut StaffForm) {
             }
             None => {
                 if ui.button("Set date").clicked() {
-                    form.joined = Some(crate::dates::now_ts().date_naive());
+                    form.joined = Some(today);
                 }
             }
         }
@@ -173,14 +173,21 @@ fn assignments(ui: &mut egui::Ui, data: &Data, form: &mut StaffForm) {
 
 /// Applies the details, then the assignment differences. Returns true when saved.
 fn save(cx: &mut Ctx, form: &mut StaffForm) -> bool {
-    let done = if form.id.is_some() { "Changes saved" } else { "Staff added" };
+    let was_new = form.id.is_none();
+    let done = if was_new { "Staff added" } else { "Changes saved" };
+    // Set as soon as the person exists, so a failure later never leads to a second add.
+    let mut created: Option<Id> = None;
     let res = cx.session.mutate(cx.now, |d, a| {
         let id = match &form.id {
             Some(id) => {
                 ops::update_staff(d, a, id, &form.name, &form.title, form.joined)?;
                 id.clone()
             }
-            None => ops::add_staff(d, a, &form.name, &form.title, form.joined)?,
+            None => {
+                let id = ops::add_staff(d, a, &form.name, &form.title, form.joined)?;
+                created = Some(id.clone());
+                id
+            }
         };
         let tests: Vec<Id> =
             d.sections.iter().flat_map(|s| &s.tests).filter(|t| !t.retired).map(|t| t.id.clone()).collect();
@@ -203,7 +210,16 @@ fn save(cx: &mut Ctx, form: &mut StaffForm) -> bool {
             false
         }
         Some(Err(e)) => {
-            form.error = Some(format!("Couldn't save: {e}"));
+            let name = form.name.trim().to_owned();
+            if let Some(id) = created {
+                // The person exists now: a retry must update, not add again.
+                form.id = Some(id);
+                form.error = Some(format!("Saved {name}, but couldn't apply all assignments: {e}"));
+            } else if form.id.is_some() && !matches!(e, OpError::EmptyName | OpError::NotFound(_)) {
+                form.error = Some(format!("Saved details, but couldn't apply all assignments: {e}"));
+            } else {
+                form.error = Some(format!("Couldn't save: {e}"));
+            }
             false
         }
         None => {

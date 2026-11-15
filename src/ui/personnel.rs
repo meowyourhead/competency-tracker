@@ -37,6 +37,8 @@ struct Summary {
     sections: Vec<String>,
     /// The earliest due pill across their assigned tests.
     next: Option<(DueInfo, DueStatus)>,
+    /// Every assigned test's pill: (test id, due, status, delayed).
+    tests: Vec<(Id, DueInfo, DueStatus, bool)>,
 }
 
 struct DeleteConfirm {
@@ -77,13 +79,16 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
         .map(|s| {
             let mut names = Vec::new();
             let mut next: Option<(DueInfo, DueStatus)> = None;
+            let mut tests = Vec::new();
             for sec in sections.iter().filter(|x| !x.retired) {
                 let mut any = false;
                 for t in sec.tests.iter().filter(|t| !t.retired && is_assigned(s, &t.id)) {
                     any = true;
                     let info = next_due(data.rule_for_test(&t.id), &idx.pair(&s.id, &t.id), &data.settings);
+                    let status = classify(info.due_on, today, data.settings.due_soon_days);
+                    let delayed = idx.delay_notes(&s.id, &t.id).iter().any(|n| n.for_stage_index == info.next_stage_index);
+                    tests.push((t.id.clone(), info.clone(), status, delayed));
                     if info.due_on.is_some() && next.as_ref().is_none_or(|(n, _)| info.due_on < n.due_on) {
-                        let status = classify(info.due_on, today, data.settings.due_soon_days);
                         next = Some((info, status));
                     }
                 }
@@ -91,7 +96,7 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
                     names.push(sec.name.clone());
                 }
             }
-            (s.id.clone(), Summary { sections: names, next })
+            (s.id.clone(), Summary { sections: names, next, tests })
         })
         .collect()
 }
@@ -357,8 +362,10 @@ fn delete_modal(ctx: &egui::Context, cx: &mut Ctx, state: &mut PersonnelState) {
 fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
     let pal = cx.pal;
     let editing = cx.session.is_editing();
+    state.refresh(cx.session, cx.today);
     let data = cx.session.data();
     let Some(staff) = state.profile.as_deref().and_then(|id| data.staff(id)) else { return };
+    let tests_due = state.cache.as_ref().and_then(|(_, _, m)| m.get(&staff.id)).map_or(&[][..], |m| m.tests.as_slice());
     if ui.add(Button::new(RichText::new("\u{2190} All staff").color(pal.muted)).frame(false)).clicked() {
         state.profile = None;
         return;
@@ -388,7 +395,6 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
     ui.label(RichText::new(bits.join(" \u{b7} ")).color(pal.muted));
     ui.add_space(14.0);
 
-    let idx = Index::build(data);
     let mut picked = None;
     let mut any = false;
     for sec in data.sections_sorted().into_iter().filter(|s| !s.retired) {
@@ -417,12 +423,10 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                                 ui.label(RichText::new("N/A").color(pal.muted));
                             }
                             AssignState::Assigned => {
-                                let info = next_due(data.rule_for_test(&t.id), &idx.pair(&staff.id, &t.id), &data.settings);
-                                let status = classify(info.due_on, cx.today, data.settings.due_soon_days);
-                                let delayed =
-                                    idx.delay_notes(&staff.id, &t.id).iter().any(|n| n.for_stage_index == info.next_stage_index);
-                                if due_pill(ui, pal, &info, status, delayed).clicked() {
-                                    picked = Some((staff.id.clone(), t.id.clone()));
+                                if let Some((_, info, status, delayed)) = tests_due.iter().find(|(id, ..)| *id == t.id) {
+                                    if due_pill(ui, pal, info, *status, *delayed).clicked() {
+                                        picked = Some((staff.id.clone(), t.id.clone()));
+                                    }
                                 }
                             }
                         });
