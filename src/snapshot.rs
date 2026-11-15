@@ -157,7 +157,9 @@ pub struct Loaded {
 /// are returned separately. A candidate that still cannot be *read* after
 /// retries is an error, so an older snapshot never loads silently in its place;
 /// one that vanished since the listing is skipped.
-fn scan(dir: &DataDir) -> io::Result<(Vec<(PathBuf, Data)>, Vec<PathBuf>)> {
+type ScanResult = (Vec<(PathBuf, Data)>, Vec<PathBuf>);
+
+fn scan(dir: &DataDir) -> io::Result<ScanResult> {
     let mut good = Vec::new();
     let mut corrupt = Vec::new();
     let entries = match fs::read_dir(dir.snapshots()) {

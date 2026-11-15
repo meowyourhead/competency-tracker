@@ -328,7 +328,7 @@ pub fn search(data: &Data, q: &str, limit: usize) -> Vec<(SearchHit, String)> {
             }
         }
     }
-    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    hits.sort_by_key(|a| std::cmp::Reverse(a.0));
     hits.into_iter().take(limit).map(|(_, h, l)| (h, l)).collect()
 }
 
@@ -385,7 +385,7 @@ pub fn filter_audit<'a>(data: &'a Data, f: &AuditFilter) -> Vec<&'a AuditEntry> 
         .filter(|e| f.action_prefix.as_ref().is_none_or(|p| e.action.starts_with(p.as_str())))
         .filter(|e| text.is_empty() || contains_ci(&e.detail, &text))
         .collect();
-    out.sort_by(|a, b| b.at.cmp(&a.at));
+    out.sort_by_key(|a| std::cmp::Reverse(a.at));
     out
 }
 
