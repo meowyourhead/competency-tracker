@@ -638,12 +638,12 @@ impl Session {
         let path = self.dir.lock_path();
         match lock::read_lock(&path) {
             Ok(None) => Some(None),
-            Ok(Some(info)) => match lock::is_stale_at(&path, &info, now) {
+            Ok(Some(info)) => match lock::is_stale_at(&path, &info, lock::server_now(&path, &self.me)) {
                 Ok(true) => Some(None),
                 Ok(false) => Some(Some(info)),
                 Err(_) => None,
             },
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => match lock::corrupt_is_stale(&path) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => match lock::corrupt_is_stale(&path, lock::server_now(&path, &self.me)) {
                 Ok(true) => Some(None),
                 Ok(false) => Some(Some(unknown_holder(now))),
                 Err(_) => None,

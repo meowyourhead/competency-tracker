@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::SystemTime;
 
 pub const HEARTBEAT_SECS: i64 = 30;
 pub const STALE_SECS: i64 = 120;
@@ -75,32 +76,54 @@ fn create_new(path: &Path, me: &LockInfo) -> io::Result<bool> {
     }
 }
 
-fn mtime_age_secs(path: &Path) -> io::Result<i64> {
-    let m = fs::metadata(path)?.modified()?;
-    Ok(match std::time::SystemTime::now().duration_since(m) {
-        Ok(d) => d.as_secs() as i64,
-        Err(_) => 0, // mtime in the future: age 0
-    })
+fn safe_machine(me: &LockInfo) -> String {
+    me.machine.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
 }
 
-/// Stale only when BOTH the recorded heartbeat and the file's mtime are older
-/// than `STALE_SECS`. The mtime check guards against clock skew between PCs.
-/// A missing file counts as stale (nothing to protect).
-pub fn is_stale_at(path: &Path, info: &LockInfo, now: Ts) -> io::Result<bool> {
-    if !is_stale(info, now) {
+/// "Now" for staleness checks: the file server's clock, read as the modified
+/// time of a probe file written in the lock's folder, so a PC whose own clock
+/// runs fast cannot judge a live lock stale. Falls back to this PC's clock
+/// when the probe cannot be written.
+pub fn server_now(lock_path: &Path, me: &LockInfo) -> SystemTime {
+    server_now_with(lock_path, me, SystemTime::now)
+}
+
+/// [`server_now`] with the fallback clock injectable (tests).
+fn server_now_with(lock_path: &Path, me: &LockInfo, local: impl FnOnce() -> SystemTime) -> SystemTime {
+    let probe = lock_path.with_file_name(format!(".clock-probe.{}.{}", safe_machine(me), me.pid));
+    // A leftover probe is removed first: rewriting the same bytes might not
+    // move its modified time.
+    let _ = fs::remove_file(&probe);
+    let stamped = fs::write(&probe, b"probe").and_then(|_| fs::metadata(&probe)?.modified());
+    let _ = fs::remove_file(&probe);
+    stamped.unwrap_or_else(|_| local())
+}
+
+/// Whole seconds from `then` to `now`; 0 when `then` is in the future.
+fn age_secs(now: SystemTime, then: SystemTime) -> i64 {
+    now.duration_since(then).map_or(0, |d| d.as_secs() as i64)
+}
+
+fn mtime_age_secs(path: &Path, now: SystemTime) -> io::Result<i64> {
+    Ok(age_secs(now, fs::metadata(path)?.modified()?))
+}
+
+/// Stale only when BOTH the recorded heartbeat and the file's mtime are more
+/// than `STALE_SECS` older than `now` (normally [`server_now`]). The mtime
+/// check guards against a holder whose clock runs slow. A missing file counts
+/// as stale (nothing to protect).
+pub fn is_stale_at(path: &Path, info: &LockInfo, now: SystemTime) -> io::Result<bool> {
+    let heartbeat: SystemTime = info.heartbeat_at.into();
+    if age_secs(now, heartbeat) <= STALE_SECS {
         return Ok(false);
     }
-    match mtime_age_secs(path) {
-        Ok(age) => Ok(age > STALE_SECS),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
-        Err(e) => Err(e),
-    }
+    corrupt_is_stale(path, now)
 }
 
 /// An unparseable lock only counts as stale once its mtime is old; a fresh one
 /// may be a peer between `create_new` and its first write.
-pub fn corrupt_is_stale(path: &Path) -> io::Result<bool> {
-    match mtime_age_secs(path) {
+pub fn corrupt_is_stale(path: &Path, now: SystemTime) -> io::Result<bool> {
+    match mtime_age_secs(path, now) {
         Ok(age) => Ok(age > STALE_SECS),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
         Err(e) => Err(e),
@@ -116,7 +139,14 @@ fn held_by_current(path: &Path, now: Ts) -> io::Result<Acquire> {
     }
 }
 
+/// Takes the lock if it is free or stale. Staleness is judged against
+/// [`server_now`], probed only when an existing lock must be judged.
 pub fn try_acquire(path: &Path, me: &LockInfo, now: Ts) -> io::Result<Acquire> {
+    try_acquire_with(path, me, now, || server_now(path, me))
+}
+
+/// [`try_acquire`] with the staleness clock injectable (tests).
+fn try_acquire_with(path: &Path, me: &LockInfo, now: Ts, clock: impl FnOnce() -> SystemTime) -> io::Result<Acquire> {
     if create_new(path, me)? {
         return Ok(Acquire::Acquired);
     }
@@ -138,14 +168,16 @@ pub fn try_acquire(path: &Path, me: &LockInfo, now: Ts) -> io::Result<Acquire> {
                     held_by_current(path, now)
                 };
             }
-            if !is_stale_at(path, &existing, now)? {
+            let reference = clock();
+            if !is_stale_at(path, &existing, reference)? {
                 return Ok(Acquire::HeldBy(existing));
             }
-            takeover_with(path, me, now, Some(existing), || {})
+            takeover_with(path, me, now, reference, Some(existing), || {})
         }
         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-            if corrupt_is_stale(path)? {
-                takeover_with(path, me, now, None, || {})
+            let reference = clock();
+            if corrupt_is_stale(path, reference)? {
+                takeover_with(path, me, now, reference, None, || {})
             } else {
                 Ok(Acquire::HeldBy(placeholder(now)))
             }
@@ -154,13 +186,14 @@ pub fn try_acquire(path: &Path, me: &LockInfo, now: Ts) -> io::Result<Acquire> {
     }
 }
 
-/// Takes over a lock judged stale. `judged` is the parsed lock we judged
-/// (`None` = unparseable and old). `before_remove` is a test hook that runs
-/// between the judgement and the compare-then-delete re-check.
+/// Takes over a lock judged stale against `reference`. `judged` is the parsed
+/// lock we judged (`None` = unparseable and old). `before_remove` is a test
+/// hook that runs between the judgement and the compare-then-delete re-check.
 fn takeover_with(
     path: &Path,
     me: &LockInfo,
     now: Ts,
+    reference: SystemTime,
     judged: Option<LockInfo>,
     before_remove: impl FnOnce(),
 ) -> io::Result<Acquire> {
@@ -169,7 +202,7 @@ fn takeover_with(
     let still_judged = match (read_lock(path), &judged) {
         (Ok(None), _) => true,
         (Ok(Some(cur)), Some(j)) => cur == *j,
-        (Err(e), None) if e.kind() == io::ErrorKind::InvalidData => corrupt_is_stale(path)?,
+        (Err(e), None) if e.kind() == io::ErrorKind::InvalidData => corrupt_is_stale(path, reference)?,
         (Err(e), _) if e.kind() != io::ErrorKind::InvalidData => return Err(e),
         _ => false,
     };
@@ -197,13 +230,8 @@ fn takeover_with(
 }
 
 fn tmp_path(path: &Path, me: &LockInfo) -> std::path::PathBuf {
-    let machine: String = me
-        .machine
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
-        .collect();
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    path.with_file_name(format!("{name}.{machine}.{}.tmp", me.pid))
+    path.with_file_name(format!("{name}.{}.{}.tmp", safe_machine(me), me.pid))
 }
 
 /// Refreshes `heartbeat_at` via a per-owner tmp file + rename. Returns
@@ -251,7 +279,7 @@ pub fn release(path: &Path, me: &LockInfo) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Duration};
+    use chrono::{DateTime, Duration, SubsecRound};
 
     fn t0() -> Ts {
         DateTime::parse_from_rfc3339("2026-11-14T10:00:00+08:00").unwrap()
@@ -265,11 +293,14 @@ mod tests {
         d.path().join("edit.lock")
     }
 
-    /// Sets the file's mtime to `secs` seconds ago.
-    fn age_file(p: &Path, secs: u64) {
+    fn sys(t: Ts) -> SystemTime {
+        t.into()
+    }
+
+    /// Sets the file's mtime.
+    fn set_mtime(p: &Path, t: SystemTime) {
         let f = fs::OpenOptions::new().write(true).open(p).unwrap();
-        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
-            .unwrap();
+        f.set_modified(t).unwrap();
     }
 
     fn write_lock(p: &Path, i: &LockInfo) {
@@ -283,10 +314,51 @@ mod tests {
         let a = info(1, t0());
         try_acquire(&p, &a, t0()).unwrap();
         let now = t0() + Duration::seconds(121);
+        set_mtime(&p, sys(now - Duration::seconds(10)));
         assert!(is_stale(&a, now));
-        assert!(!is_stale_at(&p, &a, now).unwrap());
+        assert!(!is_stale_at(&p, &a, sys(now)).unwrap());
         let b = info(2, now);
-        assert_eq!(try_acquire(&p, &b, now).unwrap(), Acquire::HeldBy(a));
+        assert_eq!(try_acquire_with(&p, &b, now, || sys(now)).unwrap(), Acquire::HeldBy(a));
+    }
+
+    #[test]
+    fn server_now_uses_the_folder_clock_not_the_local_one() {
+        let d = tempfile::tempdir().unwrap();
+        let p = lock_path(&d);
+        let me = info(1, t0());
+        let before = SystemTime::now() - std::time::Duration::from_secs(5);
+        // This PC's clock is 5 minutes fast; the folder's is not.
+        let got = server_now_with(&p, &me, || SystemTime::now() + std::time::Duration::from_secs(300));
+        assert!(got >= before && got < SystemTime::now() + std::time::Duration::from_secs(60), "{got:?}");
+        assert!(!d.path().join(".clock-probe.PC1.1").exists(), "the probe file is removed");
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn server_now_falls_back_to_the_local_clock() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("missing").join("edit.lock");
+        let local = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_234_567);
+        assert_eq!(server_now_with(&p, &info(1, t0()), || local), local);
+    }
+
+    #[test]
+    fn fast_local_clock_does_not_steal_a_live_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let p = lock_path(&d);
+        // The holder just beat, by a correct clock.
+        let real = SystemTime::now();
+        let real_ts = chrono::DateTime::<chrono::Utc>::from(real).fixed_offset().trunc_subsecs(0);
+        let holder = info(1, real_ts);
+        write_lock(&p, &holder);
+        // The taker's clock runs 5 minutes fast.
+        let fast = real + std::time::Duration::from_secs(300);
+        let fast_ts = real_ts + Duration::minutes(5);
+        assert!(is_stale_at(&p, &holder, fast).unwrap(), "judged by the fast local clock, the lock looks stale");
+        let b = info(2, fast_ts);
+        let got = try_acquire_with(&p, &b, fast_ts, || server_now_with(&p, &b, || fast)).unwrap();
+        assert_eq!(got, Acquire::HeldBy(holder));
+        assert!(!is_owner(&p, &b).unwrap());
     }
 
     #[test]
@@ -309,7 +381,7 @@ mod tests {
         write_lock(&p, &a);
         let c = info(3, t0());
         let me = info(2, t0());
-        let r = takeover_with(&p, &me, t0(), Some(a), || write_lock(&p, &c)).unwrap();
+        let r = takeover_with(&p, &me, t0(), sys(t0()), Some(a), || write_lock(&p, &c)).unwrap();
         assert_eq!(r, Acquire::HeldBy(c.clone()));
         assert_eq!(read_lock(&p).unwrap().unwrap(), c);
     }
@@ -370,10 +442,10 @@ mod tests {
         let p = lock_path(&d);
         let a = info(1, t0());
         try_acquire(&p, &a, t0()).unwrap();
-        age_file(&p, 121);
+        set_mtime(&p, sys(t0()));
         let now = t0() + Duration::seconds(121);
         let b = info(2, now);
-        assert_eq!(try_acquire(&p, &b, now).unwrap(), Acquire::TookOverStale(a));
+        assert_eq!(try_acquire_with(&p, &b, now, || sys(now)).unwrap(), Acquire::TookOverStale(a));
         assert!(is_owner(&p, &b).unwrap());
     }
 
@@ -383,9 +455,10 @@ mod tests {
         let p = lock_path(&d);
         let a = info(1, t0());
         try_acquire(&p, &a, t0()).unwrap();
+        set_mtime(&p, sys(t0()));
         let now = t0() + Duration::seconds(119);
         let b = info(2, now);
-        assert_eq!(try_acquire(&p, &b, now).unwrap(), Acquire::HeldBy(a));
+        assert_eq!(try_acquire_with(&p, &b, now, || sys(now)).unwrap(), Acquire::HeldBy(a));
     }
 
     #[test]
@@ -399,10 +472,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = lock_path(&d);
         fs::write(&p, b"{ not json").unwrap();
-        age_file(&p, 121);
+        set_mtime(&p, sys(t0() - Duration::seconds(121)));
         assert_eq!(read_lock(&p).unwrap_err().kind(), io::ErrorKind::InvalidData);
         let me = info(2, t0());
-        match try_acquire(&p, &me, t0()).unwrap() {
+        match try_acquire_with(&p, &me, t0(), || sys(t0())).unwrap() {
             Acquire::TookOverStale(prev) => assert_eq!(prev.user, "unknown"),
             other => panic!("unexpected {other:?}"),
         }
