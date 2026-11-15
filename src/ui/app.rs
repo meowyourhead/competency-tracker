@@ -215,6 +215,10 @@ impl TrackerApp {
                     }
                 });
             });
+        if self.open_detail.is_none() {
+            // Reopening the same pair later starts fresh.
+            self.detail = DetailState::default();
+        }
         self.show_modal(&ctx, now, inst);
         overlays::show_toasts(&ctx, &pal, &self.toasts);
         ctx.request_repaint_after(Duration::from_secs(1));

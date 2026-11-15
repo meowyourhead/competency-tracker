@@ -10,7 +10,7 @@ use crate::dates::fmt_date;
 use crate::model::{AssignState, Data, Id, Rule, Ts};
 use crate::ops::{self, Actor, OpError};
 use crate::query::{history, split_history, HistoryEntry, HISTORY_DEFAULT};
-use crate::schedule::{classify, completion_variance, next_due, stage_label, variance_tag, DueInfo, PairState};
+use crate::schedule::{classify, completion_variance, next_due, stage_label, variance_tag, DueInfo, DueSource, PairState};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{heading, medium, Palette};
 use crate::ui::widgets::{due_pill, icon_button};
@@ -28,6 +28,8 @@ pub(crate) enum DetailForm {
 #[derive(Clone, PartialEq)]
 enum Confirm {
     Unassign,
+    /// Skip this stage index.
+    Skip(u32),
     DeleteRecord(Id),
     DeleteDelay(Id),
 }
@@ -62,9 +64,17 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut DetailState) {
     if state.target.as_ref() != Some(&target) {
         *state = DetailState { target: Some(target.clone()), ..DetailState::default() };
     }
-    if ui.input(|i| i.key_pressed(Key::Escape)) && ui.memory(|m| m.focused().is_none()) {
+    // Esc closes the panel, unless it is closing a popup, a modal or a text field.
+    let busy = egui::Popup::is_any_open(ui.ctx()) || ui.memory(|m| m.focused().is_some() || m.top_modal_layer().is_some());
+    if ui.input(|i| i.key_pressed(Key::Escape)) && !busy {
         *cx.open_detail = None;
         return;
+    }
+    if !cx.session.is_editing() {
+        // Forms and confirmations belong to edit mode only.
+        state.form = DetailForm::None;
+        state.confirm = None;
+        state.due_pick = None;
     }
     let (staff_id, test_id) = target;
     let mut close = false;
@@ -176,7 +186,7 @@ fn actions(
                 state.error = None;
             }
             if ui.add_enabled(on, Button::new("Skip stage")).on_hover_text(format!("Skip {}", info.next_stage_label)).clicked() {
-                op = Some(Op::Skip(info.next_stage_index));
+                state.confirm = Some(Confirm::Skip(info.next_stage_index));
             }
             if ui.add_enabled(on, Button::new("Set due date")).clicked() {
                 state.due_pick = Some(info.due_on.unwrap_or(v.today));
@@ -204,13 +214,35 @@ fn actions(
     if !on {
         ui.label(RichText::new("Start editing to make changes.").color(v.pal.muted).size(12.5));
     }
-    if state.confirm == Some(Confirm::Unassign) {
-        if let Some(yes) = confirm_row(ui, v.pal, "Remove this assignment? Its history is kept.", "Unassign") {
+    if assign != Some(AssignState::Assigned) {
+        // Only an assigned test can be completed, delayed, skipped or rescheduled.
+        if !matches!(state.form, DetailForm::EditRecord { .. }) {
+            state.form = DetailForm::None;
+        }
+        state.due_pick = None;
+        if matches!(state.confirm, Some(Confirm::Skip(_))) {
             state.confirm = None;
-            if yes {
-                op = Some(Op::Assign(None));
+        }
+    }
+    match state.confirm.clone() {
+        Some(Confirm::Unassign) => {
+            if let Some(yes) = confirm_row(ui, v.pal, "Remove this assignment? Its history is kept.", "Unassign") {
+                state.confirm = None;
+                if yes {
+                    op = Some(Op::Assign(None));
+                }
             }
         }
+        Some(Confirm::Skip(stage)) => {
+            let text = format!("Skip {}?", stage_label(v.rule, stage));
+            if let Some(yes) = confirm_row(ui, v.pal, &text, "Skip") {
+                state.confirm = None;
+                if yes {
+                    op = Some(Op::Skip(stage));
+                }
+            }
+        }
+        _ => {}
     }
     if let Some(date) = &mut state.due_pick {
         let mut done = None;
@@ -221,7 +253,8 @@ fn actions(
                 if ui.add_enabled(on, Button::new("Set")).clicked() {
                     done = Some(Some(Op::Due(Some(*date))));
                 }
-                if ui.add_enabled(on && info.source != crate::schedule::DueSource::Rule, Button::new("Clear")).clicked() {
+                let has_override = matches!(info.source, DueSource::Manual | DueSource::Excel);
+                if ui.add_enabled(on && has_override, Button::new("Clear")).clicked() {
                     done = Some(Some(Op::Due(None)));
                 }
                 if ui.button("Cancel").clicked() {
@@ -499,9 +532,10 @@ fn apply(cx: &mut Ctx, state: &mut DetailState, staff_id: &str, test_id: &str, o
         Op::Skip(_) => ("Stage skipped", false),
         Op::Due(Some(_)) => ("Due date set", false),
         Op::Due(None) => ("Due date cleared", false),
-        Op::Assign(Some(AssignState::Assigned)) => ("Assigned", false),
-        Op::Assign(Some(AssignState::Na)) => ("Marked N/A", false),
-        Op::Assign(None) => ("Unassigned", false),
+        // A changed assignment makes any open form stale.
+        Op::Assign(Some(AssignState::Assigned)) => ("Assigned", true),
+        Op::Assign(Some(AssignState::Na)) => ("Marked N/A", true),
+        Op::Assign(None) => ("Unassigned", true),
     };
     let run = |d: &mut Data, a: &Actor| -> Result<(), OpError> {
         match op {
@@ -520,6 +554,8 @@ fn apply(cx: &mut Ctx, state: &mut DetailState, staff_id: &str, test_id: &str, o
             state.error = None;
             if closes_form {
                 state.form = DetailForm::None;
+                state.due_pick = None;
+                state.confirm = None;
             }
             cx.toasts.push(Toast::new(done));
         }

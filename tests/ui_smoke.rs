@@ -377,6 +377,158 @@ fn mark_complete_adds_record() {
     assert_eq!(added.completed_on, now_ts().date_naive());
 }
 
+fn button<'a>(h: &'a Harness<'static, TrackerApp>, label: &'a str) -> egui_kittest::Node<'a> {
+    h.get_by_role_and_label(egui::accesskit::Role::Button, label)
+}
+
+fn has_button(h: &Harness<'static, TrackerApp>, label: &str) -> bool {
+    h.query_by_role_and_label(egui::accesskit::Role::Button, label).is_some()
+}
+
+#[test]
+fn mark_na_closes_open_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    button(&h, "Mark complete").click();
+    h.run();
+    assert!(has_button(&h, "Save"));
+    h.get_by_label_contains("Mark N/A / Unassign").click();
+    h.run();
+    button(&h, "Mark N/A").click();
+    h.run();
+    let agnes = h.state().session().data().staff.iter().find(|s| s.id == "p-agnes").unwrap().clone();
+    assert_eq!(agnes.assignments["t-cobas"].state, AssignState::Na);
+    assert!(!has_button(&h, "Save"), "the Mark complete form is gone");
+}
+
+#[test]
+fn stopping_editing_clears_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    button(&h, "Mark complete").click();
+    h.run();
+    assert!(has_button(&h, "Save"));
+    button(&h, "Stop editing").click();
+    h.run();
+    assert!(!h.state().session().is_editing());
+    assert!(!has_button(&h, "Save"));
+}
+
+#[test]
+fn skip_stage_asks_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    button(&h, "Skip stage").click();
+    h.run();
+    assert!(h.state().session().data().skipped.is_empty(), "nothing happens before confirming");
+    h.get_by_label("Skip Semi-annual?");
+    button(&h, "Skip").click();
+    h.run();
+    let skipped = &h.state().session().data().skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].stage_index, 1);
+}
+
+#[test]
+fn clear_due_date_needs_an_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    button(&h, "Set due date").click();
+    h.run();
+    assert!(button(&h, "Clear").accesskit_node().is_disabled(), "rule-based due date: nothing to clear");
+    button(&h, "Set").click();
+    h.run();
+    assert_eq!(h.state().session().data().due_overrides.len(), 1);
+    button(&h, "Set due date").click();
+    h.run();
+    assert!(!button(&h, "Clear").accesskit_node().is_disabled());
+}
+
+#[test]
+fn escape_with_menu_open_keeps_panel() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    h.get_by_label_contains("Mark N/A / Unassign").click();
+    h.run();
+    assert!(has_button(&h, "Mark N/A"));
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.query_by_label("Close panel").is_some(), "Esc closed the menu, not the panel");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.query_by_label("Close panel").is_none());
+}
+
+#[test]
+fn reopening_same_pair_starts_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _) = six_completions(&dir);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    h.get_by_label("Show 2 older entries").click();
+    h.run();
+    assert!(h.query_by_label("Show 2 older entries").is_none());
+    h.get_by_label("Close panel").click();
+    h.run();
+    h.get_by_label("Agnes \u{b7} Cobas").click();
+    h.run();
+    h.get_by_label("Show 2 older entries");
+}
+
+#[test]
+fn picking_a_section_draws_its_grid_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        d.sections[1].tests = vec![TestSystem { id: "t-ruby".into(), name: "Ruby".into(), order: 0, retired: false, rule_id: None }];
+        d.staff.push(staff("p-cara", "Cara", "MLT", "t-ruby"));
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    button(&h, "Sections").click();
+    h.run();
+    button(&h, "Haematology").click();
+    h.step();
+    assert!(h.query_by_label("Cara \u{b7} Ruby").is_some(), "grid drawn in the same frame");
+}
+
+#[test]
+fn wheel_over_names_scrolls_grid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        for i in 0..40 {
+            d.staff.push(staff(&format!("p-{i:02}"), &format!("P{i:02}"), "MLT", "t-cobas"));
+        }
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    button(&h, "Sections").click();
+    h.run();
+    assert!(h.query_by_label("P39 \u{b7} Cobas").is_none(), "last row starts out of view");
+    let first = h.get_by_label("P00 \u{b7} Cobas").rect();
+    let over_names = egui::pos2(first.left() - 80.0, first.center().y);
+    for _ in 0..6 {
+        h.event(egui::Event::PointerMoved(over_names));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -2000.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        // Smooth scrolling keeps repainting for a few frames.
+        h.run_steps(10);
+    }
+    assert!(h.query_by_label("P39 \u{b7} Cobas").is_some(), "the grid scrolled to the bottom");
+}
+
 /// The Summary page's search box (the last text input in the tree).
 fn summary_search<'a>(h: &'a Harness<'static, TrackerApp>) -> egui_kittest::Node<'a> {
     h.query_all_by_role(egui::accesskit::Role::TextInput).last().expect("search box")

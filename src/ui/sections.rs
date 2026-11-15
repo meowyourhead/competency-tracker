@@ -134,15 +134,15 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
         empty_state(ui, "No sections", "Add sections in Settings.");
         return;
     };
-    let section = state.section.as_deref().and_then(|id| sections.iter().find(|s| s.id == id)).unwrap_or(first);
-    if state.section.as_deref() != Some(section.id.as_str()) {
-        state.section = Some(section.id.clone());
-    }
+    let find = |id: Option<&str>| id.and_then(|id| sections.iter().copied().find(|s| s.id == id));
+    let mut section = find(state.section.as_deref()).unwrap_or(first);
     if let Some(picked) = section_pills(ui, pal, &sections, &section.id) {
-        state.section = Some(picked);
+        section = find(Some(&picked)).unwrap_or(section);
         state.test = None;
         state.sort_by_test = None;
-        return;
+    }
+    if state.section.as_deref() != Some(section.id.as_str()) {
+        state.section = Some(section.id.clone());
     }
     ui.add_space(12.0);
     state.refresh(session, cx.today, section);
@@ -293,8 +293,20 @@ fn draw_grid(
     let names = Rect::from_min_max(outer.min + Vec2::new(0.0, HEAD_H), egui::pos2(outer.left() + NAME_W, outer.bottom()));
     let body = Rect::from_min_max(outer.min + Vec2::new(NAME_W, HEAD_H), outer.max);
 
+    // The wheel over the header or the name column scrolls the cells too.
+    let offset_key = ui.id().with(("grid_offset", section_id));
+    let mut area = ScrollArea::both().id_salt(("grid_scroll", section_id)).auto_shrink(false);
+    if ui.rect_contains_pointer(header) || ui.rect_contains_pointer(names) {
+        let delta = ui.input(|i| i.smooth_scroll_delta);
+        if delta != Vec2::ZERO {
+            ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+            let prev: Vec2 = ui.data(|d| d.get_temp(offset_key)).unwrap_or_default();
+            let max = (content - body.size()).max(Vec2::ZERO) + Vec2::splat(bar);
+            area = area.scroll_offset((prev - delta).clamp(Vec2::ZERO, max));
+        }
+    }
     let mut body_ui = ui.new_child(UiBuilder::new().max_rect(body.shrink(1.0)).id_salt(("grid_body", section_id)));
-    let out = ScrollArea::both().id_salt(("grid_scroll", section_id)).auto_shrink(false).show_viewport(
+    let out = area.show_viewport(
         &mut body_ui,
         |ui, viewport| {
             let origin = ui.max_rect().min;
@@ -315,6 +327,7 @@ fn draw_grid(
         },
     );
     let offset = out.state.offset;
+    ui.data_mut(|d| d.insert_temp(offset_key, offset));
     let line = Stroke::new(1.0, pal.border);
 
     // Header strip.
