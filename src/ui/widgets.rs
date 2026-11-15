@@ -8,6 +8,7 @@ use egui::{
 use egui_phosphor::regular as icon;
 
 use crate::dates::fmt_date;
+use crate::model::Data;
 use crate::schedule::{DueInfo, DueSource, DueStatus};
 use crate::ui::theme::{serif, Palette};
 
@@ -75,6 +76,75 @@ pub fn due_pill(
         info.next_stage_label,
         status_label(status)
     ))
+}
+
+/// `0xRRGGBB` as a colour.
+pub fn rgb(c: u32) -> Color32 {
+    Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+/// A section's colour: its own, else the default for its place among the
+/// sorted sections. `None` when there is no such section.
+pub fn section_color(data: &Data, section_id: &str) -> Option<Color32> {
+    data.sections_sorted()
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.id == section_id)
+        .map(|(i, s)| rgb(s.color_rgb(i)))
+}
+
+/// Size of a section chip's text.
+pub const SECTION_CHIP_SIZE: f32 = 11.5;
+const SECTION_DOT_R: f32 = 3.0;
+
+/// Width of a section chip for `name` (dot, gap, text, padding).
+pub fn section_chip_width(ui: &Ui, name: &str) -> f32 {
+    let text = ui
+        .painter()
+        .layout_no_wrap(
+            name.to_owned(),
+            FontId::proportional(SECTION_CHIP_SIZE),
+            Color32::WHITE,
+        )
+        .size()
+        .x;
+    text + 2.0 * SECTION_DOT_R + 5.0 + 16.0
+}
+
+/// Paints a section chip (soft tint, dot, name) into `rect`.
+pub fn paint_section_chip(ui: &Ui, pal: &Palette, rect: Rect, name: &str, color: Color32) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let p = ui.painter();
+    p.rect_filled(rect, PILL, color.gamma_multiply(0.14));
+    let dot = egui::pos2(rect.left() + 8.0 + SECTION_DOT_R, rect.center().y);
+    p.circle_filled(dot, SECTION_DOT_R, color);
+    p.text(
+        egui::pos2(dot.x + SECTION_DOT_R + 5.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        name,
+        FontId::proportional(SECTION_CHIP_SIZE),
+        pal.text,
+    );
+}
+
+/// A section's name as a chip in its colour.
+pub fn section_chip(ui: &mut Ui, pal: &Palette, name: &str, color: Color32) -> egui::Response {
+    let h = ui.text_style_height(&egui::TextStyle::Body).min(18.0) + 2.0;
+    let size = Vec2::new(section_chip_width(ui, name), h);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    paint_section_chip(ui, pal, rect, name, color);
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, name));
+    resp
+}
+
+/// A small filled dot in a section's colour, inline.
+pub fn section_dot(ui: &mut Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().circle_filled(rect.center(), 3.5, color);
+    }
 }
 
 /// A clickable summary card: big serif number over a muted label.
@@ -497,5 +567,31 @@ pub fn nav_item(
         resp.on_hover_text(label)
     } else {
         resp
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Data, SECTION_COLORS};
+
+    fn data() -> Data {
+        Data::new_empty("t", crate::dates::now_ts())
+    }
+
+    #[test]
+    fn section_color_by_position() {
+        let d = data();
+        let id = d.sections_sorted()[1].id.clone();
+        assert_eq!(section_color(&d, &id), Some(rgb(SECTION_COLORS[1])));
+    }
+
+    #[test]
+    fn section_color_custom_and_unknown() {
+        let mut d = data();
+        d.sections[0].color = Some("#112233".into());
+        let id = d.sections[0].id.clone();
+        assert_eq!(section_color(&d, &id), Some(rgb(0x112233)));
+        assert_eq!(section_color(&d, "nope"), None);
     }
 }

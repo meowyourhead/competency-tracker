@@ -28,8 +28,8 @@ use crate::session::Session;
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{medium, Palette};
 use crate::ui::widgets::{
-    chip_select, due_pill_text, empty_state, search_box, segmented, status_colors, status_label,
-    SEARCH_W,
+    chip_select, due_pill_text, empty_state, rgb, search_box, segmented, status_colors,
+    status_label, SEARCH_W,
 };
 
 /// The frozen name column.
@@ -220,10 +220,6 @@ fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Com
         },
         groups,
     }
-}
-
-fn rgb(c: u32) -> Color32 {
-    Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
 fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> Grid {
