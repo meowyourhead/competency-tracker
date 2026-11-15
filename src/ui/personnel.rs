@@ -164,6 +164,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) 
         let out = profile::show(ui, cx, &id, &mut state.profile_ui);
         if out.back {
             state.profile = None;
+            state.profile_ui.reset_view();
         } else if out.edit {
             state.editing = cx.session.data().staff(&id).map(StaffForm::edit);
         }

@@ -16,8 +16,8 @@ use crate::schedule::{classify, next_due, DueInfo, DueStatus};
 use crate::ui::app::Ctx;
 use crate::ui::theme::{heading, medium, Palette};
 use crate::ui::widgets::{
-    due_pill, empty_state, paint_section_chip, rgb, section_chip, section_chip_width, section_dot,
-    segmented, status_colors,
+    due_pill, due_pill_text, empty_state, paint_section_chip, rgb, section_chip,
+    section_chip_width, section_dot, segmented, status_colors,
 };
 
 /// What the profile keeps between frames.
@@ -29,6 +29,14 @@ pub(crate) struct ProfileUi {
     pub sort_by_due: bool,
     /// (person, data revision, date) the rows were built for.
     cache: Option<(Id, u64, NaiveDate, Vec<ProfileRow>)>,
+}
+
+impl ProfileUi {
+    /// A fresh page: no status filter, table grouped by section.
+    pub fn reset_view(&mut self) {
+        self.filter = None;
+        self.sort_by_due = false;
+    }
 }
 
 /// What the user asked of the page this frame.
@@ -73,8 +81,7 @@ pub(crate) fn show(
     if !fresh {
         if st.cache.as_ref().is_some_and(|(id, ..)| id != staff_id) {
             // Another person: start from an unfiltered page.
-            st.filter = None;
-            st.sort_by_due = false;
+            st.reset_view();
         }
         st.cache = Some((staff.id.clone(), rev, cx.today, rows(data, staff, cx.today)));
     }
@@ -274,9 +281,17 @@ fn next_up_line(
     let tail = when(due, today);
     // Painted as one widget, so it is one thing to click (and to find).
     let size = 13.5;
+    let avail = ui.available_width().max(1.0);
     let p = ui.painter();
     let lead = p.layout_no_wrap("Next up".into(), FontId::proportional(size), pal.muted);
-    let name = p.layout_no_wrap(r.test_name.clone(), FontId::new(size, medium()), pal.text);
+    // A very long name is shortened to fit beside "Next up" (in full on hover).
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        r.test_name.clone(),
+        FontId::new(size, medium()),
+        pal.text,
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width((avail - lead.size().x - 7.0).max(40.0));
+    let name = p.layout_job(job);
     let stage = p.layout_no_wrap(
         info.next_stage_label.clone(),
         FontId::proportional(size),
@@ -300,7 +315,6 @@ fn next_up_line(
     ];
     // Flow them, wrapping onto a new line when the page is too narrow.
     let (gap, line_h) = (7.0, 22.0);
-    let avail = ui.available_width().max(1.0);
     let mut at = Vec::with_capacity(pieces.len());
     let (mut x, mut line, mut widest) = (0.0_f32, 0_usize, 0.0_f32);
     for (_, w, _) in &pieces {
@@ -346,6 +360,11 @@ fn next_up_line(
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Space between the table's columns.
+const COL_GAP: f32 = 28.0;
+/// The table's Test column keeps at least this much room.
+const MIN_NAME_W: f32 = 160.0;
+
 /// The rows sorted by soonest due; undated after dated, N/A last.
 fn by_due<'a>(rows: &[&'a ProfileRow]) -> Vec<&'a ProfileRow> {
     let mut v = rows.to_vec();
@@ -370,6 +389,37 @@ fn table(
     } else {
         rows.to_vec()
     };
+    // The Test column gets what the other columns leave, up to its widest
+    // name; longer names are shortened (in full on hover).
+    let text_w = |t: &str, size: f32| {
+        ui.painter()
+            .layout_no_wrap(t.to_owned(), FontId::proportional(size), pal.text)
+            .size()
+            .x
+    };
+    let body = egui::TextStyle::Body.resolve(ui.style()).size;
+    let pad = 2.0 * ui.spacing().button_padding.x;
+    let widest = |f: &dyn Fn(&ProfileRow) -> f32| rows.iter().map(|r| f(r)).fold(0.0, f32::max);
+    let chip_col =
+        widest(&|r| section_chip_width(ui, &r.section_name)).max(text_w("Section", 12.5));
+    let date_col = text_w("28 Sep 2026", body).max(text_w("Last done", 12.5));
+    let pill_col = widest(&|r| match &r.due {
+        // Pill text, its padding, and room for the delay marker.
+        Some((info, ..)) => text_w(&due_pill_text(info), 12.5) + 20.0 + 16.0,
+        None => text_w("N/A", body),
+    })
+    .max(text_w("Next due", 12.5) + 20.0);
+    let name_widest = widest(&|r| text_w(&r.test_name, body) + pad).max(text_w("Test", 12.5));
+    // Margins, stroke, and some slack for what the estimates miss.
+    let mut others = chip_col + date_col + pill_col + 3.0 * COL_GAP + 2.0 * 16.0 + 2.0 + 24.0;
+    // Too narrow (say beside the detail panel): drop "Last done" so the
+    // test names keep readable room.
+    let show_done = ui.available_width() - others >= MIN_NAME_W;
+    if !show_done {
+        others -= date_col + COL_GAP;
+    }
+    let name_col =
+        name_widest.min((ui.available_width() - others).max(MIN_NAME_W.min(name_widest)));
     Frame::new()
         .fill(pal.card)
         .stroke(Stroke::new(1.0, pal.border))
@@ -378,13 +428,15 @@ fn table(
         .show(ui, |ui| {
             // As wide as its columns, so nothing is stranded far to the right.
             egui::Grid::new("profile_table")
-                .num_columns(4)
-                .spacing([28.0, 8.0])
+                .num_columns(if show_done { 4 } else { 3 })
+                .spacing([COL_GAP, 8.0])
                 .show(ui, |ui| {
                     let head = |t: &str| RichText::new(t).color(pal.muted).size(12.5);
                     ui.label(head("Section"));
                     ui.label(head("Test"));
-                    ui.label(head("Last done"));
+                    if show_done {
+                        ui.label(head("Last done"));
+                    }
                     let arrow = if *sort_by_due {
                         format!("  {}", icon::CARET_DOWN)
                     } else {
@@ -409,20 +461,32 @@ fn table(
                         } else {
                             ui.label("");
                         }
-                        // Whole names: the column takes the widest one.
-                        let name =
-                            Button::new(RichText::new(&r.test_name).color(pal.text)).frame(false);
-                        if ui.add(name).clicked() {
+                        let h = ui.spacing().interact_size.y;
+                        let clicked = ui
+                            .allocate_ui_with_layout(
+                                Vec2::new(name_col, h),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.set_width(name_col);
+                                    test_name(ui, pal, &r.test_name).clicked()
+                                },
+                            )
+                            .inner;
+                        if clicked {
                             picked = Some(r.test_id.clone());
                         }
                         match &r.due {
                             None => {
-                                ui.label(RichText::new("\u{2014}").color(pal.muted));
+                                if show_done {
+                                    ui.label(RichText::new("\u{2014}").color(pal.muted));
+                                }
                                 ui.label(RichText::new("N/A").color(pal.muted));
                             }
                             Some((info, status, delayed)) => {
-                                let done = r.last_done.map_or("\u{2014}".to_owned(), fmt_date);
-                                ui.label(RichText::new(done).color(pal.muted));
+                                if show_done {
+                                    let done = r.last_done.map_or("\u{2014}".to_owned(), fmt_date);
+                                    ui.label(RichText::new(done).color(pal.muted));
+                                }
                                 if due_pill(ui, pal, info, *status, *delayed).clicked() {
                                     picked = Some(r.test_id.clone());
                                 }
@@ -540,9 +604,11 @@ fn card(ui: &mut egui::Ui, pal: &Palette, g: &[&ProfileRow]) -> Option<Id> {
         });
     // The section's colour along the top edge.
     let rect = frame.response.rect;
+    // A card-shaped top, clipped to 3pt, so the strip follows the corners.
     let strip = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), 3.0));
-    ui.painter().rect_filled(
-        strip,
+    let top = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), 20.0));
+    ui.painter().with_clip_rect(strip).rect_filled(
+        top,
         CornerRadius {
             nw: 10,
             ne: 10,

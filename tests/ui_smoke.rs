@@ -1152,7 +1152,19 @@ fn profile_table_view() {
 #[test]
 fn profile_filter_survives_view_toggle() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = session(&dir, 1);
+    let mut h = agnes_two_tests(&dir);
+    open_agnes(&mut h);
+    h.get_by_label("Overdue 1").click();
+    h.run();
+    h.get_by_label("Table").click();
+    h.run();
+    h.get_by_label("Cobas");
+    assert!(h.query_by_label("Architect").is_none(), "filtered out");
+}
+
+/// Agnes on Cobas (overdue) and Architect (on track).
+fn agnes_two_tests(dir: &tempfile::TempDir) -> Harness<'static, TrackerApp> {
+    let mut s = session(dir, 1);
     s.mutate(now_ts(), |d, _| {
         let test = |id: &str, name: &str, order| TestSystem {
             id: id.into(),
@@ -1178,13 +1190,7 @@ fn profile_filter_survives_view_toggle() {
     .unwrap();
     let mut h = harness(TrackerApp::new_for_test(s));
     h.run();
-    open_agnes(&mut h);
-    h.get_by_label("Overdue 1").click();
-    h.run();
-    h.get_by_label("Table").click();
-    h.run();
-    h.get_by_label("Cobas");
-    assert!(h.query_by_label("Architect").is_none(), "filtered out");
+    h
 }
 
 #[test]
@@ -1263,6 +1269,99 @@ fn audit_filter_by_user() {
         "jtan's entry is filtered out"
     );
     h.get_by_label("Added Cara to personnel");
+}
+
+const LONG_TEST: &str =
+    "Cobas c311 Integrated Chemistry and Immunoassay Analyzer Module with Sample Handling Unit and ISE";
+
+/// Agnes (overdue) on a test with a very long name; returns her pill's text.
+fn seeded_long(dir: &tempfile::TempDir) -> (Harness<'static, TrackerApp>, String) {
+    let mut s = session(dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        d.sections[0].tests = vec![TestSystem {
+            id: "t-cobas".into(),
+            name: LONG_TEST.into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        }];
+        d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
+        d.records.push(initial("p-agnes", "t-cobas", 365));
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    let done = now_ts().date_naive() - chrono::Days::new(365);
+    let due = fmt_date(done.checked_add_months(chrono::Months::new(6)).unwrap());
+    (h, due)
+}
+
+/// The left edge of the open detail panel (its heading is the right-most "Agnes").
+fn panel_left(h: &Harness<'static, TrackerApp>) -> f32 {
+    h.query_all_by_label("Agnes")
+        .map(|n| n.rect().left())
+        .fold(f32::MIN, f32::max)
+}
+
+#[test]
+fn profile_table_fits_beside_panel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, due) = seeded_long(&dir);
+    open_agnes(&mut h);
+    h.get_by_label("Table").click();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, LONG_TEST)
+        .click();
+    h.run();
+    h.run();
+    let left = panel_left(&h);
+    // The panel shows the same pill; only the page's own ones count.
+    let pills: Vec<_> = h
+        .query_all_by_label(&due)
+        .filter(|p| p.rect().left() < left)
+        .collect();
+    assert!(!pills.is_empty());
+    for pill in pills {
+        assert!(pill.rect().right() <= left, "pill under the panel");
+    }
+}
+
+#[test]
+fn profile_cards_fit_beside_panel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, due) = seeded_long(&dir);
+    open_agnes(&mut h);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, LONG_TEST)
+        .click();
+    h.run();
+    h.run();
+    let left = panel_left(&h);
+    // The panel shows the same pill; only the page's own ones count.
+    let pills: Vec<_> = h
+        .query_all_by_label(&due)
+        .filter(|p| p.rect().left() < left)
+        .collect();
+    assert!(!pills.is_empty());
+    for pill in pills {
+        assert!(pill.rect().right() <= left, "pill under the panel");
+    }
+    let next = h.get_by_label_contains("Next up:");
+    assert!(next.rect().right() <= left, "next-up line under the panel");
+}
+
+#[test]
+fn profile_filter_resets_on_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = agnes_two_tests(&dir);
+    open_agnes(&mut h);
+    h.get_by_label("Overdue 1").click();
+    h.run();
+    assert!(h.query_by_label("Architect").is_none(), "filtered");
+    h.get_by_label("\u{2190} All staff").click();
+    h.run();
+    h.get_by_label("Agnes").click();
+    h.run();
+    h.get_by_label("Architect");
 }
 
 /// History with one entry whose refs name `section_id`.
