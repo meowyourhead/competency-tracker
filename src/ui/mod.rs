@@ -10,6 +10,7 @@ mod import_review;
 mod import_wizard;
 mod overlays;
 mod personnel;
+mod profile;
 mod sections;
 mod settings;
 mod staff_editor;
