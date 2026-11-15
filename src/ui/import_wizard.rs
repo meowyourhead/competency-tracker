@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use egui::{Button, Frame, Margin, RichText, Stroke};
 
 use crate::import::excel::{read_workbook, RawSheet};
-use crate::import::mapping::{build_import, propose_merges, ImportOptions, ImportPlan, MergeGroup};
+use crate::import::mapping::{build_import, carry_over, propose_merges, ImportOptions, ImportPlan, MergeGroup};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::import_review;
 use crate::ui::theme::{heading, medium, Palette};
@@ -86,8 +86,11 @@ impl ImportWizard {
 
     fn run_import(&mut self, cx: &mut Ctx) {
         let Some(plan) = &self.plan else { return };
-        if !cx.session.replace_data(cx.now, plan.data.clone()) {
-            self.error = Some("Couldn't save the imported data. Check the data folder, then try again.".to_owned());
+        // Settings, the default rule and the audit history survive a re-import.
+        let mut data = plan.data.clone();
+        carry_over(&mut data, cx.session.data());
+        if let Err(e) = cx.session.replace_data(cx.now, data) {
+            self.error = Some(if cx.session.is_editing() { e } else { "Editing ended, so nothing was imported.".to_owned() });
             return;
         }
         let report = &plan.report;
@@ -200,13 +203,13 @@ fn review_names(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) {
             .color(pal.muted),
     );
     ui.add_space(8.0);
-    import_review::show(ui, pal, cx.today, &mut w.groups);
+    let names_ok = import_review::show(ui, pal, cx.today, &mut w.groups);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui.button("Back").clicked() {
             w.step = WizardStep::PickFile;
         }
-        if ui.button("Next").clicked() {
+        if ui.add_enabled(names_ok, Button::new("Next")).clicked() {
             w.build_preview(cx);
         }
     });
@@ -229,7 +232,7 @@ fn preview(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) {
     if !data.staff.is_empty() || !data.records.is_empty() {
         Frame::new().fill(pal.yellow_bg).corner_radius(8).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
             ui.label(
-                RichText::new("This replaces the current data. The previous snapshot stays in the snapshots folder.")
+                RichText::new("This replaces the current data. A backup of it is saved first to the snapshots\\archive folder.")
                     .color(pal.yellow_fg),
             );
         });
@@ -420,6 +423,86 @@ mod tests {
         h.get_by_label("Start editing to import");
         assert!(button(&h, "Import").accesskit_node().is_disabled());
         assert!(h.state().session.data().staff.is_empty());
+    }
+
+    fn import_now(h: &mut Harness<'static, St>) {
+        button(h, "Next").click();
+        h.run();
+        button(h, "Import").click();
+        h.run();
+        assert_eq!(h.state().wizard.step, WizardStep::Done);
+    }
+
+    #[test]
+    fn edited_name_title_and_joined_reach_the_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(&dir);
+        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT"), sheet("Serology", "Xin Yi", "MT")]);
+        h.run();
+        let g = &mut h.state_mut().wizard.groups[0];
+        g.name = "Xin Yi Lim".into();
+        g.title = "SMT".into();
+        g.joined = Some(ymd(2019, 5, 6));
+        h.run();
+        import_now(&mut h);
+        let s = &h.state().session.data().staff[0];
+        assert_eq!((s.name.as_str(), s.title.as_str(), s.joined), ("Xin Yi Lim", "SMT", Some(ymd(2019, 5, 6))));
+    }
+
+    #[test]
+    fn split_then_import_yields_two_staff() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(&dir);
+        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT"), sheet("Serology", "Xin Yi", "MT")]);
+        h.run();
+        button(&h, "Split").click();
+        h.run();
+        // Both halves are named "Xin Yi": Next waits until one is renamed.
+        h.get_by_label("Some names are blank or shared by two people. Fix them (see the yellow notes) before going on.");
+        assert!(button(&h, "Next").accesskit_node().is_disabled());
+        h.state_mut().wizard.groups[1].name = "Xin Yi B".into();
+        h.run();
+        import_now(&mut h);
+        assert_eq!(h.state().session.data().staff.len(), 2);
+    }
+
+    #[test]
+    fn blank_name_disables_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(&dir);
+        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.run();
+        assert!(!button(&h, "Next").accesskit_node().is_disabled());
+        h.state_mut().wizard.groups[0].name = "  ".into();
+        h.run();
+        assert!(button(&h, "Next").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn reimport_keeps_settings_audit_and_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(&dir);
+        h.state_mut().session.mutate(now_ts(), |d, _| d.settings.due_soon_days = 45).unwrap();
+        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.run();
+        import_now(&mut h);
+        let first = h.state().session.data().audit.len();
+        // A second import over the first, the same day.
+        h.state_mut().wizard = ImportWizard::default();
+        h.state_mut().wizard.load_sheets(vec![sheet("Hematology", "Bea", "MT")]);
+        h.run();
+        button(&h, "Next").click();
+        h.run();
+        h.get_by_label_contains("A backup of it is saved first");
+        button(&h, "Import").click();
+        h.run();
+        assert_eq!(h.state().wizard.step, WizardStep::Done);
+        let data = h.state().session.data();
+        assert_eq!(data.settings.due_soon_days, 45);
+        assert_eq!(data.audit.len(), first + 1, "history kept, one new import entry");
+        assert_eq!(data.staff[0].name, "Bea");
+        let archive = dir.path().join("CompetencyData").join("snapshots").join("archive");
+        assert_eq!(std::fs::read_dir(archive).unwrap().count(), 1, "the first import was backed up");
     }
 
     #[test]

@@ -247,13 +247,21 @@ impl Session {
     /// Replaces all data (import) and saves immediately. Editing only.
     /// Returns true when the data was replaced and saved; a failed save is
     /// retried by `tick` as usual.
-    pub fn replace_data(&mut self, now: Ts, data: Data) -> bool {
+    pub fn replace_data(&mut self, now: Ts, data: Data) -> Result<(), String> {
         if !self.is_editing() {
-            return false;
+            return Err("Not in edit mode".into());
+        }
+        // The day's snapshot name is per user, so a same-day import would
+        // overwrite it: keep the current data in the archive first.
+        if !self.data.staff.is_empty() || !self.data.records.is_empty() {
+            let name = self.file_name(now);
+            if let Err(e) = write_copy(&self.dir.archive(), &self.data, &name, "pre-import", now) {
+                return Err(format!("Couldn't back up the current data, so nothing was imported: {e}"));
+            }
         }
         self.data = data;
         self.mark_dirty(now);
-        self.save_now(now).is_ok()
+        self.save_now(now).map(|_| ())
     }
 
     pub fn tick(&mut self, now: Ts, inst: Instant) -> Vec<SessionEvent> {
@@ -913,7 +921,7 @@ mod tests {
         assert_eq!(s.read_only_reason(), Some("Data was saved by a newer version of the app"));
         assert!(!dir.lock_path().exists());
         assert!(s.mutate(t0(), |d, _| d.settings.due_soon_days = 1).is_none());
-        assert!(!s.replace_data(t0(), Data::new_empty("jtan", t0())));
+        assert!(s.replace_data(t0(), Data::new_empty("jtan", t0())).is_err());
         assert!(s.start_editing(at(1), clock.at(1)).is_err());
         assert!(!dir.lock_path().exists());
         let ev = s.tick(at(10), clock.at(10));
@@ -960,9 +968,55 @@ mod tests {
         let rev = s.revision();
         let mut imported = Data::new_empty("jtan", t0());
         imported.settings.due_soon_days = 7;
-        assert!(s.replace_data(at(1), imported));
+        s.replace_data(at(1), imported).unwrap();
         assert!(s.revision() > rev);
         assert_eq!(load_latest(&dir).unwrap().unwrap().data.settings.due_soon_days, 7);
+    }
+
+    fn with_staff(name: &str) -> Data {
+        let mut d = Data::new_empty("jtan", t0());
+        d.staff.push(crate::model::Staff {
+            id: format!("p-{name}"),
+            name: name.into(),
+            title: String::new(),
+            joined: None,
+            status: crate::model::StaffStatus::Active,
+            assignments: Default::default(),
+        });
+        d
+    }
+
+    fn archived_names(dir: &DataDir) -> Vec<Vec<String>> {
+        files_in(&dir.archive())
+            .iter()
+            .map(|p| {
+                let d: Data = serde_json::from_slice(&fs::read(p).unwrap()).unwrap();
+                d.staff.into_iter().map(|s| s.name).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_day_reimport_keeps_the_first_import_in_archive() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.replace_data(at(1), with_staff("Ann")).unwrap();
+        assert!(archived_names(&dir).is_empty(), "nothing to back up before the first import");
+        s.replace_data(at(2), with_staff("Bea")).unwrap();
+        assert_eq!(archived_names(&dir), vec![vec!["Ann".to_string()]]);
+        assert_eq!(s.data().staff[0].name, "Bea");
+    }
+
+    #[test]
+    fn failed_backup_stops_the_replace() {
+        let (_t, dir, clock) = setup();
+        let mut s = open(&dir, "jtan", 1, &clock);
+        s.replace_data(at(1), with_staff("Ann")).unwrap();
+        fs::remove_dir_all(dir.archive()).ok();
+        fs::write(dir.archive(), b"not a folder").unwrap();
+        let err = s.replace_data(at(2), with_staff("Bea")).unwrap_err();
+        assert!(err.starts_with("Couldn't back up the current data, so nothing was imported:"), "{err}");
+        assert_eq!(s.data().staff[0].name, "Ann", "data is untouched");
     }
 
     #[test]

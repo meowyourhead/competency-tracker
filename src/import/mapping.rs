@@ -258,6 +258,20 @@ pub struct ImportPlan {
     pub report: ImportReport,
 }
 
+/// Keeps what an import must not reset: the settings, the default rule's
+/// stages and the whole audit history (placed before the import's own entry).
+pub fn carry_over(plan: &mut Data, current: &Data) {
+    plan.settings = current.settings.clone();
+    let wanted = current.rules.iter().find(|r| r.id == current.default_rule_id).map(|r| r.stages.clone());
+    let own = plan.default_rule_id.clone();
+    if let (Some(stages), Some(rule)) = (wanted, plan.rules.iter_mut().find(|r| r.id == own)) {
+        rule.stages = stages;
+    }
+    let mut audit = current.audit.clone();
+    audit.append(&mut plan.audit);
+    plan.audit = audit;
+}
+
 fn is_na_text(s: &str) -> bool {
     matches!(s.trim().to_lowercase().as_str(), "-" | "na" | "n/a")
 }
@@ -1022,6 +1036,27 @@ mod tests {
             p.data.records.iter().filter(|r| r.staff_id == staff && r.test_id == test).collect();
         v.sort_by_key(|r| r.completed_on);
         v
+    }
+
+    #[test]
+    fn carry_over_keeps_settings_rule_and_audit() {
+        let mut plan = run(&[one_test("Hematology", true, vec![block1(4, "A", [date(2025, 1, 10, true), empty(), empty(), empty()])])]).data;
+        let mut current = plan.clone();
+        current.settings.due_soon_days = 45;
+        current.settings.initial_due_days = Some(14);
+        let rid = current.default_rule_id.clone();
+        current.rules.iter_mut().find(|r| r.id == rid).unwrap().stages.truncate(1);
+        let old = AuditEntry { at: now(), by: "agnes".into(), action: "staff.add".into(), detail: "old".into(), refs: Default::default() };
+        current.audit = vec![old.clone()];
+        assert_eq!(plan.audit.len(), 1);
+
+        carry_over(&mut plan, &current);
+        assert_eq!(plan.settings, current.settings);
+        let stages = |d: &Data| d.rules.iter().find(|r| r.id == d.default_rule_id).unwrap().stages.clone();
+        assert_eq!(stages(&plan), stages(&current));
+        assert_eq!(plan.audit.len(), 2);
+        assert_eq!(plan.audit[0], old);
+        assert_eq!(plan.audit[1].action, "import.excel");
     }
 
     #[test]

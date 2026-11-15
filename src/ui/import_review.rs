@@ -6,7 +6,7 @@ use chrono::NaiveDate;
 use egui::collapsing_header::CollapsingState;
 use egui::{Frame, Margin, RichText, Stroke, TextEdit};
 
-use crate::import::mapping::{split_group, MergeGroup};
+use crate::import::mapping::{normalize_name, split_group, MergeGroup};
 use crate::ui::theme::{medium, Palette};
 use crate::ui::widgets::date_picker;
 
@@ -14,16 +14,39 @@ fn needs_look(g: &MergeGroup) -> bool {
     g.members.len() > 1 || !g.conflicts.is_empty()
 }
 
-pub(super) fn show(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &mut Vec<MergeGroup>) {
+/// A blank name, or one used by another group (two groups would become one person).
+fn name_problems(groups: &[MergeGroup]) -> Vec<Option<&'static str>> {
+    let keys: Vec<String> = groups.iter().map(|g| normalize_name(&g.name)).collect();
+    keys.iter()
+        .map(|k| {
+            if k.is_empty() {
+                Some("This name is blank. Give this person a name.")
+            } else if keys.iter().filter(|o| *o == k).count() > 1 {
+                Some("Another person has this name. Rename one of them.")
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Draws the review. Returns true when every name is usable (Next may proceed).
+pub(super) fn show(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &mut Vec<MergeGroup>) -> bool {
+    let problems = name_problems(groups);
+    let ok = problems.iter().all(Option::is_none);
     let (look, single): (Vec<usize>, Vec<usize>) = (0..groups.len()).partition(|&i| needs_look(&groups[i]));
     let mut split = None;
+    if !ok {
+        note(ui, pal, "Some names are blank or shared by two people. Fix them (see the yellow notes) before going on.");
+        ui.add_space(6.0);
+    }
     ui.label(RichText::new(format!("Needs a look ({})", look.len())).family(medium()).size(15.5).color(pal.text));
     ui.add_space(4.0);
     if look.is_empty() {
         ui.label(RichText::new("No name appears on more than one tab.").color(pal.muted));
     }
     for &i in &look {
-        group_card(ui, pal, today, groups, i, &mut split);
+        group_card(ui, pal, today, groups, i, problems[i], &mut split);
     }
     ui.add_space(6.0);
     let id = ui.make_persistent_id("import_single_names");
@@ -33,7 +56,7 @@ pub(super) fn show(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &
         })
         .body(|ui| {
             for &i in &single {
-                group_card(ui, pal, today, groups, i, &mut split);
+                group_card(ui, pal, today, groups, i, problems[i], &mut split);
             }
         });
     if let Some(i) = split {
@@ -43,9 +66,24 @@ pub(super) fn show(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &
         state.set_open(true);
         state.store(ui.ctx());
     }
+    ok && split.is_none()
 }
 
-fn group_card(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &mut [MergeGroup], idx: usize, split: &mut Option<usize>) {
+fn note(ui: &mut egui::Ui, pal: &Palette, text: &str) {
+    Frame::new().fill(pal.yellow_bg).corner_radius(6).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
+        ui.label(RichText::new(text).color(pal.yellow_fg));
+    });
+}
+
+fn group_card(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    today: NaiveDate,
+    groups: &mut [MergeGroup],
+    idx: usize,
+    problem: Option<&str>,
+    split: &mut Option<usize>,
+) {
     let g = &mut groups[idx];
     Frame::new()
         .fill(pal.card)
@@ -83,11 +121,9 @@ fn group_card(ui: &mut egui::Ui, pal: &Palette, today: NaiveDate, groups: &mut [
                     }
                 }
             });
-            for c in &g.conflicts {
+            for c in g.conflicts.iter().map(String::as_str).chain(problem) {
                 ui.add_space(4.0);
-                Frame::new().fill(pal.yellow_bg).corner_radius(6).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
-                    ui.label(RichText::new(c).color(pal.yellow_fg));
-                });
+                note(ui, pal, c);
             }
             ui.add_space(4.0);
             let one = g.members.len() < 2;
