@@ -56,7 +56,10 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SettingsState) {
             return;
         }
         ui.add_space(4.0);
-        import_wizard::show(ui, cx, wizard);
+        if import_wizard::show(ui, cx, wizard) {
+            state.wizard = None;
+            state.tab = SettingsTab::Import;
+        }
         return;
     }
     heading(ui, "Settings");

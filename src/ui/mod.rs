@@ -6,6 +6,7 @@ pub mod widgets;
 
 mod audit;
 mod detail;
+mod import_review;
 mod import_wizard;
 mod overlays;
 mod personnel;
