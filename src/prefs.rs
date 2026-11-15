@@ -11,12 +11,37 @@ pub enum Theme {
     Dark,
 }
 
+/// The display scales offered in Settings, as zoom factors.
+pub const DISPLAY_SCALES: [f32; 4] = [0.9, 1.0, 1.2, 1.4];
+
 /// Missing fields take their defaults, so prefs from another version still load.
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Prefs {
     pub theme: Theme,
     pub sidebar_collapsed: bool,
+    /// One of [`DISPLAY_SCALES`]; anything else reads as 100%.
+    pub display_scale: f32,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            theme: Theme::default(),
+            sidebar_collapsed: false,
+            display_scale: 1.0,
+        }
+    }
+}
+
+impl Prefs {
+    /// The display scale, or 100% when the saved value isn't one offered.
+    pub fn scale(&self) -> f32 {
+        DISPLAY_SCALES
+            .into_iter()
+            .find(|s| (s - self.display_scale).abs() < 0.001)
+            .unwrap_or(1.0)
+    }
 }
 
 /// `%APPDATA%\CompetencyTracker\prefs.json`.
@@ -60,12 +85,27 @@ mod tests {
         let saved = Prefs {
             theme: Theme::Dark,
             sidebar_collapsed: true,
+            display_scale: 1.2,
         };
         save_prefs_to(&path, &saved).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("\"dark\""));
         let back = load_prefs_from(&path);
         assert_eq!(back.theme, Theme::Dark);
         assert!(back.sidebar_collapsed);
+        assert_eq!(back.scale(), 1.2);
+    }
+
+    #[test]
+    fn display_scale_defaults_to_100_and_ignores_odd_values() {
+        assert_eq!(Prefs::default().scale(), 1.0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(load_prefs_from(&path).scale(), 1.0);
+        std::fs::write(&path, r#"{"display_scale":3.0}"#).unwrap();
+        assert_eq!(load_prefs_from(&path).scale(), 1.0);
+        std::fs::write(&path, r#"{"display_scale":1.4}"#).unwrap();
+        assert_eq!(load_prefs_from(&path).scale(), 1.4);
     }
 
     #[test]

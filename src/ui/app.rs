@@ -33,6 +33,11 @@ const RELOAD_TOAST_EVERY: Duration = Duration::from_secs(60);
 const TITLEBAR_H: f32 = 44.0;
 /// How close to the window edge a press starts a resize.
 const RESIZE_GRIP: f32 = 5.0;
+/// Below this window width (in points) the sidebar folds to icons.
+const NARROW_W: f32 = 1000.0;
+/// The detail panel takes half the room beside the sidebar, within these.
+const DETAIL_MIN_W: f32 = 380.0;
+const DETAIL_MAX_W: f32 = 620.0;
 
 /// What the user clicked in the title bar this frame.
 #[derive(Default)]
@@ -193,6 +198,10 @@ pub(crate) struct Ctx<'a> {
     pub now: Ts,
     pub toasts: &'a mut Vec<Toast>,
     pub open_detail: &'a mut Option<(Id, Id)>,
+    /// This computer's display scale (a zoom factor); Settings may change it.
+    pub display_scale: &'a mut f32,
+    /// Set to a person's id to open their profile on the Personnel page.
+    pub open_profile: &'a mut Option<Id>,
 }
 
 pub struct TrackerApp {
@@ -201,6 +210,10 @@ pub struct TrackerApp {
     prefs_path: Option<PathBuf>,
     page: Page,
     styled: bool,
+    /// The window is too narrow (in points) for the full sidebar.
+    narrow: bool,
+    /// While narrow, the sidebar was opened anyway (not saved).
+    sidebar_peek: bool,
     toasts: Vec<Toast>,
     modal: Option<Modal>,
     /// Ask the OS to flash the window (the inactivity prompt just opened).
@@ -243,6 +256,8 @@ impl TrackerApp {
             prefs_path,
             page: Page::Summary,
             styled: false,
+            narrow: false,
+            sidebar_peek: false,
             toasts: Vec::new(),
             modal: None,
             attention: false,
@@ -266,6 +281,7 @@ impl TrackerApp {
     fn style(&mut self, ctx: &egui::Context) {
         theme::install_fonts(ctx);
         theme::apply(ctx, self.prefs.theme);
+        ctx.set_zoom_factor(self.prefs.scale());
         self.styled = true;
     }
 
@@ -325,16 +341,19 @@ impl TrackerApp {
         self.toasts.retain(|t| t.until > inst);
         let focus_search =
             self.modal.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K));
-        if focus_search && self.prefs.sidebar_collapsed {
+        if focus_search && self.compact_sidebar() {
             self.set_sidebar_collapsed(false);
         }
         let pal = theme::palette(self.prefs.theme);
 
-        let width = if self.prefs.sidebar_collapsed {
-            60.0
-        } else {
-            264.0
-        };
+        // The window's width in points: at a large display scale on a small
+        // screen the sidebar folds to icons (it can still be opened for a
+        // while) and the detail panel narrows, so the page keeps its room.
+        let total_w = ui.max_rect().width();
+        self.narrow = total_w < NARROW_W;
+        let width = if self.compact_sidebar() { 60.0 } else { 264.0 };
+        let detail_w = ((total_w - width) * 0.5).clamp(DETAIL_MIN_W, DETAIL_MAX_W);
+        let scale_before = self.prefs.display_scale;
         Panel::left("sidebar")
             .exact_size(width)
             .resizable(false)
@@ -370,12 +389,18 @@ impl TrackerApp {
         let pal = theme::palette(self.prefs.theme);
         overlays::banner(ui, &pal, &self.session);
         let today = now.date_naive();
+        let mut open_profile = None;
         // Drawn on every page whenever a detail target is open; slides in and out.
         let mut detail_open = self.open_detail.is_some();
         Panel::right("detail")
-            .exact_size(420.0)
+            .exact_size(detail_w)
             .resizable(false)
-            .frame(Frame::new().fill(pal.card).inner_margin(Margin::same(20)))
+            .frame(
+                Frame::new()
+                    .fill(pal.card)
+                    .stroke(egui::Stroke::new(1.0, pal.border))
+                    .inner_margin(Margin::symmetric(24, 20)),
+            )
             .show_collapsible(ui, &mut detail_open, |ui| {
                 let mut cx = Ctx {
                     session: &mut self.session,
@@ -384,6 +409,8 @@ impl TrackerApp {
                     now,
                     toasts: &mut self.toasts,
                     open_detail: &mut self.open_detail,
+                    display_scale: &mut self.prefs.display_scale,
+                    open_profile: &mut open_profile,
                 };
                 detail::show(ui, &mut cx, &mut self.detail);
             });
@@ -403,6 +430,8 @@ impl TrackerApp {
                         now,
                         toasts: &mut self.toasts,
                         open_detail: &mut self.open_detail,
+                        display_scale: &mut self.prefs.display_scale,
+                        open_profile: &mut open_profile,
                     };
                     match self.page {
                         Page::Summary => summary::show(ui, &mut cx, &mut self.summary),
@@ -413,9 +442,18 @@ impl TrackerApp {
                     }
                 });
             });
+        if let Some(id) = open_profile {
+            self.personnel.profile = Some(id);
+            self.page = Page::Personnel;
+        }
         if self.open_detail.is_none() {
             // Reopening the same pair later starts fresh.
             self.detail = DetailState::default();
+        }
+        if self.prefs.display_scale != scale_before {
+            // Takes effect from the next frame, laid out afresh at the new size.
+            ctx.set_zoom_factor(self.prefs.scale());
+            self.save_prefs();
         }
         self.show_modal(&ctx, &pal, now, inst);
         overlays::show_toasts(&ctx, &pal, &self.toasts);
@@ -587,7 +625,21 @@ impl TrackerApp {
         self.save_prefs();
     }
 
+    /// Icons only: as saved, or because the window is narrow (unless opened).
+    fn compact_sidebar(&self) -> bool {
+        if self.narrow {
+            !self.sidebar_peek
+        } else {
+            self.prefs.sidebar_collapsed
+        }
+    }
+
     fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+        if self.narrow {
+            // A narrow window's folding isn't the user's saved choice.
+            self.sidebar_peek = !collapsed;
+            return;
+        }
         self.prefs.sidebar_collapsed = collapsed;
         self.save_prefs();
     }
@@ -626,7 +678,7 @@ impl TrackerApp {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, pal: &Palette, focus_search: bool) {
-        let compact = self.prefs.sidebar_collapsed;
+        let compact = self.compact_sidebar();
         // The header's empty space moves the window, like a title bar. Added
         // first so the collapse button on top of it still takes its clicks.
         let header = egui::Rect::from_min_size(

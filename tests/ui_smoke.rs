@@ -223,34 +223,51 @@ fn seeded(dir: &tempfile::TempDir, agnes_days_ago: u64) -> Harness<'static, Trac
 }
 
 #[test]
-fn summary_shows_overdue_count_and_row() {
+fn summary_shows_figures_and_action_row() {
     let dir = tempfile::tempdir().unwrap();
     let h = seeded(&dir, 365);
+    h.get_by_label("Staff 2");
+    h.get_by_label("Assessments current 50%");
+    h.get_by_label("Outstanding 1");
     h.get_by_label("Overdue 1");
-    h.get_by_label("Due within 30 days 0");
-    h.get_by_label("On track 1");
-    h.get_by_label("Delayed 0");
-    h.get_by_label("Agnes");
+    h.get_by_label("Due soon 0");
+    h.get_by_label("Overdue (1)");
+    h.get_by_label("Agnes \u{b7} Cobas");
+    // The register lists both people.
+    button(&h, "Agnes");
+    button(&h, "Bram");
 }
 
 #[test]
-fn summary_stat_card_filters_and_toggles_back() {
+fn summary_status_figure_filters_and_toggles_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
-    assert!(h.query_by_label("Bram").is_some());
     h.get_by_label("Overdue 1").click();
     h.run();
     assert!(
         h.query_by_label("Bram").is_none(),
-        "only overdue rows are listed"
+        "only people with overdue assessments are listed"
     );
-    assert!(h.query_by_label("Agnes").is_some());
+    button(&h, "Agnes");
+    h.get_by_label("Staff 1");
     h.get_by_label("Overdue 1").click();
     h.run();
     assert!(
         h.query_by_label("Bram").is_some(),
-        "a second click resets to all"
+        "a second click shows everyone again"
     );
+}
+
+#[test]
+fn summary_section_row_filters_by_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    assert!(h.query_by_label("Clear filters").is_none());
+    h.get_by_label("Chemistry 50% current").click();
+    h.run();
+    h.get_by_label("Clear filters").click();
+    h.run();
+    assert!(h.query_by_label("Clear filters").is_none());
 }
 
 #[test]
@@ -264,16 +281,13 @@ fn summary_row_click_opens_detail() {
 }
 
 #[test]
-fn summary_groups_by_test() {
+fn summary_register_name_opens_profile() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
-    // By person: one card per person, the section only in the row details.
-    assert!(h.query_by_label("Chemistry").is_none());
-    h.get_by_label("By test").click();
+    h.get_by_label("Bram").click();
     h.run();
-    // By test: a card per test with its section in the header.
-    assert_eq!(h.query_all_by_label("Chemistry").count(), 2);
-    h.get_by_label("Agnes \u{b7} Cobas");
+    h.get_by_label("\u{2190} All staff");
+    h.get_by_label("Architect");
 }
 
 #[test]
@@ -285,8 +299,8 @@ fn summary_empty_states() {
 
     let dir = tempfile::tempdir().unwrap();
     let h = seeded(&dir, 30); // both on track
-    h.get_by_label("Everyone is up to date");
-    assert!(h.query_by_label("Agnes").is_none());
+    h.get_by_label("Nothing is overdue.");
+    assert!(h.query_by_label("Agnes \u{b7} Cobas").is_none());
 }
 
 #[test]
@@ -418,18 +432,13 @@ fn all_sections_is_one_table_grouped_by_section() {
 }
 
 #[test]
-fn summary_search_narrowing_on_track_person_lists_row() {
+fn summary_register_search_narrows_people() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 30); // both on track
-    h.get_by_label("Everyone is up to date");
     summary_search(&h).click();
     h.run();
     summary_search(&h).type_text("Agnes");
     h.run();
-    assert!(
-        h.query_by_label("Everyone is up to date").is_none(),
-        "a narrowing filter lists rows instead"
-    );
     h.get_by_label("Agnes");
     assert!(h.query_by_label("Bram").is_none());
 }
@@ -443,7 +452,6 @@ fn summary_search_with_no_match_shows_no_matches() {
     summary_search(&h).type_text("zzzz");
     h.run();
     h.get_by_label("No matches");
-    assert!(h.query_by_label("Everyone is up to date").is_none());
 }
 
 #[test]
@@ -497,8 +505,9 @@ fn six_completions(dir: &tempfile::TempDir) -> (Harness<'static, TrackerApp>, Ve
     let today = now_ts().date_naive();
     let lines: Vec<String> = (0..6u64)
         .map(|i| {
+            // Each history entry's details toggle names its stage and date.
             format!(
-                "{} \u{b7} {}",
+                "Show details of {}, {}",
                 labels[i as usize],
                 fmt_date(today - chrono::Days::new(2200 - i * 365))
             )
@@ -547,6 +556,58 @@ fn detail_shows_four_then_more() {
         h.get_by_label(line);
     }
     assert!(h.query_by_label("Show 2 older entries").is_none());
+}
+
+#[test]
+fn history_hides_who_recorded_an_entry_until_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, lines) = six_completions(&dir);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    assert!(h.query_by_label_contains("Recorded by").is_none());
+    h.get_by_label(&lines[5]).click();
+    h.run();
+    h.get_by_label_contains("Recorded by tester on");
+    // Editing actions live in the opened entry too.
+    assert!(h.query_by_label_contains("  Edit").is_some());
+    assert!(h.query_by_label_contains("  Delete").is_some());
+    let hide = lines[5].replacen("Show", "Hide", 1);
+    h.get_by_label(&hide).click();
+    h.run();
+    assert!(h.query_by_label_contains("Recorded by").is_none());
+}
+
+#[test]
+fn editing_an_entry_opens_its_form_in_the_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, lines) = six_completions(&dir);
+    open_cell(&mut h, "Agnes \u{b7} Cobas");
+    h.get_by_label(&lines[5]).click();
+    h.run();
+    h.get_by_label_contains("  Edit").click();
+    h.run();
+    h.get_by_label("Edit entry");
+    // The form sits below the entry's own details, not at the top.
+    let form_y = h.get_by_label("Edit entry").rect().top();
+    let by_y = h.get_by_label_contains("Recorded by").rect().top();
+    let mark_y = button(&h, "Mark complete").rect().top();
+    assert!(form_y > by_y && form_y > mark_y);
+}
+
+#[test]
+fn display_scale_changes_zoom() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(TrackerApp::new_for_test(session(&dir, 1)));
+    h.run();
+    button(&h, "Settings").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("120%").click();
+    h.run();
+    assert!((h.ctx.zoom_factor() - 1.2).abs() < 0.001);
+    h.get_by_label("100%").click();
+    h.run();
+    assert!((h.ctx.zoom_factor() - 1.0).abs() < 0.001);
 }
 
 #[test]
@@ -821,7 +882,7 @@ fn status_of(h: &Harness<'static, TrackerApp>, id: &str) -> Option<StaffStatus> 
 fn remove_staff_removes_from_summary() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
-    h.get_by_label("Agnes");
+    button(&h, "Agnes");
     go_personnel(&mut h);
     assert!(!has_button(&h, "Hidden"), "no Hidden tab");
     button(&h, "Actions for Agnes").click();
@@ -836,7 +897,8 @@ fn remove_staff_removes_from_summary() {
         h.query_by_label("Agnes").is_none(),
         "removed staff vanish from the summary"
     );
-    h.get_by_label("Everyone is up to date");
+    h.get_by_label("Nothing is overdue.");
+    h.get_by_label("Staff 1");
 }
 
 /// Ticks the `index`th checkbox on the page (row checkboxes have no text).
@@ -1154,7 +1216,7 @@ fn settings_change_recomputes_pills() {
         .checked_sub_months(chrono::Months::new(6))
         .unwrap();
     let mut h = seeded(&dir, (today - done).num_days() as u64);
-    h.get_by_label("Due within 30 days 0");
+    h.get_by_label("Due soon 0");
     go_settings_tab(&mut h, "General");
     let due_soon = h
         .query_all_by_role(egui::accesskit::Role::SpinButton)
@@ -1171,7 +1233,7 @@ fn settings_change_recomputes_pills() {
     assert_eq!(h.state().session().data().settings.due_soon_days, 60);
     button(&h, "Summary").click();
     h.run();
-    h.get_by_label("Due within 60 days 1");
+    h.get_by_label("Due soon 1");
 }
 
 /// The Summary page's search box (the last text input in the tree).

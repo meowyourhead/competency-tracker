@@ -24,6 +24,11 @@ pub struct Palette {
     pub red_fg: Color32,
     pub grey_bg: Color32,
     pub grey_fg: Color32,
+    /// Competency stages on the timeline: the first stage (Initial), the
+    /// one-off stages after it (Semi-annual), and the repeating stage (Annual).
+    pub stage_first: Color32,
+    pub stage_interval: Color32,
+    pub stage_recurring: Color32,
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -48,6 +53,9 @@ pub fn palette(t: Theme) -> Palette {
             red_fg: hex(0x9B2C1F),
             grey_bg: hex(0xEDEBE4),
             grey_fg: hex(0x73726C),
+            stage_first: hex(0x2E7D6B),
+            stage_interval: hex(0x5457C2),
+            stage_recurring: hex(0xB0731A),
         },
         Theme::Dark => Palette {
             bg: hex(0x262624),
@@ -65,6 +73,9 @@ pub fn palette(t: Theme) -> Palette {
             red_fg: hex(0xF0A69B),
             grey_bg: hex(0x3A3935),
             grey_fg: hex(0xA6A39A),
+            stage_first: hex(0x62BFA9),
+            stage_interval: hex(0x9A9CF0),
+            stage_recurring: hex(0xE2A84F),
         },
     }
 }

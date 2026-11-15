@@ -14,3 +14,4 @@ mod sections;
 mod settings;
 mod staff_editor;
 mod summary;
+mod timeline;

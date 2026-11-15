@@ -21,10 +21,44 @@ use crate::ui::app::Ctx;
 use crate::ui::theme::{medium, Palette};
 use crate::ui::widgets::icon_button;
 
-/// The width given to a section's or test system's name (and its "Retired"
-/// tag), so every row's buttons start in the same place, right beside it.
+/// The least width given to a section's or test system's name (and its
+/// "Retired" tag). The slot grows to the longest name in its list, so every
+/// row's buttons start in the same place, right beside it.
 const SECTION_SLOT: f32 = 200.0;
-const TEST_SLOT: f32 = 260.0;
+const TEST_SLOT: f32 = 220.0;
+/// Room the "Retired" tag takes after a name.
+const RETIRED_W: f32 = 72.0;
+/// Left indent of a section's test list.
+const TEST_INDENT: i8 = 76;
+/// What a test row needs besides its name: handle, rule dropdown, Retire
+/// and Delete buttons, and the gaps between them.
+const TEST_ROW_REST: f32 = 18.0 + 150.0 + 110.0 + 100.0 + 48.0;
+const SECTION_ROW_REST: f32 = 18.0 + 32.0 + 30.0 + 110.0 + 100.0 + 48.0;
+
+/// The slot that fits the widest of `names` without cutting it short,
+/// as long as the row's other controls still fit in `room`.
+fn name_slot<'a>(
+    ui: &egui::Ui,
+    names: impl Iterator<Item = (&'a str, bool)>,
+    family: egui::FontFamily,
+    least: f32,
+    room: f32,
+) -> f32 {
+    let size = egui::TextStyle::Button.resolve(ui.style()).size;
+    let font = egui::FontId::new(size, family);
+    let widest = names
+        .map(|(name, retired)| {
+            let w = ui
+                .painter()
+                .layout_no_wrap(name.to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x;
+            // Button padding, plus the tag when retired.
+            w + 2.0 * ui.spacing().button_padding.x + if retired { RETIRED_W } else { 0.0 }
+        })
+        .fold(0.0, f32::max);
+    widest.min(room).max(least)
+}
 
 /// What a drag handle carries: the row, its place in its list, and the list
 /// (the sections, or one section's tests) it may be dropped back into.
@@ -92,6 +126,8 @@ struct Item<'a> {
     /// Place in its list, and the list's drag group.
     index: usize,
     group: &'a str,
+    /// Width of the name (and tag) slot.
+    slot: f32,
 }
 
 impl SectionsTab {
@@ -126,6 +162,25 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut SectionsTab) {
         );
         ui.add_space(6.0);
         let sections = data.sections_sorted();
+        let room = ui.available_width();
+        let section_slot = name_slot(
+            ui,
+            sections.iter().map(|s| (s.name.as_str(), s.retired)),
+            medium(),
+            SECTION_SLOT,
+            room - SECTION_ROW_REST,
+        );
+        // One slot for every section's tests, so all their buttons line up.
+        let test_slot = name_slot(
+            ui,
+            sections
+                .iter()
+                .flat_map(|s| s.tests.iter())
+                .map(|t| (t.name.as_str(), t.retired)),
+            egui::FontFamily::Proportional,
+            TEST_SLOT,
+            room - f32::from(TEST_INDENT) - TEST_ROW_REST,
+        );
         let mut blocks = Vec::with_capacity(sections.len());
         for (i, sec) in sections.iter().enumerate() {
             let top = ui.cursor().top();
@@ -139,6 +194,7 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut SectionsTab) {
                 has_records,
                 index: i,
                 group: SECTIONS_GROUP,
+                slot: section_slot,
             };
             let color = rgb(sec.color_rgb(i));
             let custom = sec.color.is_some();
@@ -160,13 +216,13 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut SectionsTab) {
             if open {
                 Frame::new()
                     .inner_margin(Margin {
-                        left: 76,
+                        left: TEST_INDENT,
                         right: 0,
                         top: 0,
                         bottom: 6,
                     })
                     .show(ui, |ui| {
-                        tests(ui, pal, editing, data, st, &sec.id, &mut act);
+                        tests(ui, pal, editing, data, st, &sec.id, test_slot, &mut act);
                     });
             }
             ui.separator();
@@ -200,6 +256,7 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut SectionsTab) {
 }
 
 /// The tests of one section, then the "Add test" field.
+#[allow(clippy::too_many_arguments)]
 fn tests(
     ui: &mut egui::Ui,
     pal: &Palette,
@@ -207,6 +264,7 @@ fn tests(
     data: &Data,
     st: &mut SectionsTab,
     section_id: &str,
+    slot: f32,
     act: &mut Option<Act>,
 ) {
     let Some(sec) = data.section(section_id) else {
@@ -237,6 +295,7 @@ fn tests(
             has_records,
             index: i,
             group: section_id,
+            slot,
         };
         let current = t
             .rule_id
@@ -350,14 +409,14 @@ fn item_row<R>(
         if is_section {
             out = lead.take().map(|f| f(ui, st, act));
         }
-        let slot = if is_section { SECTION_SLOT } else { TEST_SLOT };
+        let slot = item.slot;
         let h = ui.spacing().interact_size.y;
         ui.allocate_ui_with_layout(
             Vec2::new(slot, h),
             Layout::left_to_right(Align::Center),
             |ui| {
                 ui.set_min_size(Vec2::new(slot, h));
-                let chip_w = if item.retired { 72.0 } else { 0.0 };
+                let chip_w = if item.retired { RETIRED_W } else { 0.0 };
                 ui.scope(|ui| {
                     ui.set_max_width(slot - chip_w);
                     name_cell(ui, pal, editing, st, item, act);
@@ -489,9 +548,11 @@ fn name_cell(
     let button = Button::new(RichText::new(item.name).family(font).color(color))
         .frame(false)
         .wrap_mode(egui::TextWrapMode::Truncate);
+    // The full name too, in case the slot had to shorten it.
     let resp = ui
         .add_enabled(editing, button)
-        .on_hover_text("Click to rename");
+        .on_hover_text(format!("{}\nClick to rename", item.name))
+        .on_disabled_hover_text(item.name);
     if resp.clicked() {
         *act = Some(Act::StartRename(item.target.clone(), item.name.to_owned()));
     }

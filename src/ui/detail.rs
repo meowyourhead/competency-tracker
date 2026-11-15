@@ -1,8 +1,13 @@
 //! Competency detail panel: one person and one test system. Header with the
 //! next-due pill, the actions (edit mode only), and the history, newest first.
 
+use std::collections::HashSet;
+
 use chrono::NaiveDate;
-use egui::{Align, Button, ComboBox, Frame, Key, Layout, Margin, RichText, ScrollArea, TextEdit};
+use egui::{
+    Align, Button, ComboBox, Frame, Key, Layout, Margin, Pos2, RichText, ScrollArea, Stroke,
+    TextEdit,
+};
 use egui_phosphor::regular as icon;
 
 use crate::dates::fmt_date;
@@ -15,6 +20,7 @@ use crate::schedule::{
 };
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{heading, medium, Palette};
+use crate::ui::timeline::{self, stage_chip, stage_color, stage_kind};
 use crate::ui::widgets::{date_picker, due_pill, icon_button};
 
 #[derive(Default)]
@@ -52,6 +58,8 @@ enum Confirm {
 pub(crate) struct DetailState {
     /// Show every history entry, not just the latest four.
     pub expanded: bool,
+    /// History entries opened to show who recorded them, comments and actions.
+    open_entries: HashSet<Id>,
     pub form: DetailForm,
     /// The (staff, test) this state belongs to; a new target resets it.
     target: Option<(Id, Id)>,
@@ -139,6 +147,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut DetailState) {
             rule,
             editing,
             today: cx.today,
+            info: &info,
         };
         ui.add_space(6.0);
         match assign {
@@ -165,12 +174,26 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut DetailState) {
         }
         ui.add_space(10.0);
         op = actions(ui, &view, state, assign, &info);
-        if let Some(e) = &state.error {
-            ui.label(RichText::new(e).color(cx.pal.red_fg));
+        // An entry being edited shows its own error, beside its form.
+        if !editing_entry(state) {
+            if let Some(e) = &state.error {
+                ui.label(RichText::new(e).color(cx.pal.red_fg));
+            }
         }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(RichText::new("History").family(medium()).size(15.0));
+        ui.add_space(14.0);
+        section_title(ui, cx.pal, "Timeline");
+        timeline::show(
+            ui,
+            cx.pal,
+            rule,
+            &pair,
+            &info,
+            cx.today,
+            data.settings.due_soon_days,
+            assign == Some(AssignState::Assigned),
+        );
+        ui.add_space(18.0);
+        section_title(ui, cx.pal, "History");
         let entries = history(data, &staff_id, &test_id);
         if let Some(o) = history_list(ui, &view, state, &entries, &pair) {
             op = Some(o);
@@ -192,6 +215,12 @@ struct View<'a> {
     rule: &'a Rule,
     editing: bool,
     today: NaiveDate,
+    info: &'a DueInfo,
+}
+
+/// A history entry's Edit form is open (it shows inside that entry).
+fn editing_entry(state: &DetailState) -> bool {
+    matches!(state.form, DetailForm::EditRecord { .. })
 }
 
 /// Name and subtitle with the close button; returns true when closed.
@@ -243,35 +272,42 @@ fn actions(
 ) -> Option<Op> {
     let mut op = None;
     let on = v.editing;
-    ui.horizontal_wrapped(|ui| match assign {
-        Some(AssignState::Assigned) => {
-            if ui.add_enabled(on, Button::new("Mark complete")).clicked() {
-                state.form = DetailForm::Complete {
-                    date: v.today,
-                    stage: info.next_stage_index,
-                    comment: String::new(),
-                };
-                state.error = None;
-            }
-            if ui.add_enabled(on, Button::new("Add delay note")).clicked() {
-                state.form = DetailForm::Delay {
-                    note: String::new(),
-                    expected: None,
-                };
-                state.error = None;
-            }
-            if ui
-                .add_enabled(on, Button::new("Skip stage"))
-                .on_hover_text(format!("Skip {}", info.next_stage_label))
-                .clicked()
-            {
-                state.confirm = Some(Confirm::Skip(info.next_stage_index));
-            }
-            if ui.add_enabled(on, Button::new("Set due date")).clicked() {
-                state.due_pick = Some(info.due_on.unwrap_or(v.today));
-            }
-            ui.add_enabled_ui(on, |ui| {
-                ui.menu_button(format!("Mark N/A / Unassign  {}", icon::CARET_DOWN), |ui| {
+    ui.horizontal_wrapped(|ui| {
+        // A button that doesn't fit moves to the next line whole.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        match assign {
+            Some(AssignState::Assigned) => {
+                if ui.add_enabled(on, Button::new("Mark complete")).clicked() {
+                    state.form = DetailForm::Complete {
+                        date: v.today,
+                        stage: info.next_stage_index,
+                        comment: String::new(),
+                    };
+                    state.error = None;
+                }
+                if ui.add_enabled(on, Button::new("Add delay note")).clicked() {
+                    state.form = DetailForm::Delay {
+                        note: String::new(),
+                        expected: None,
+                    };
+                    state.error = None;
+                }
+                if ui
+                    .add_enabled(on, Button::new("Skip stage"))
+                    .on_hover_text(format!("Skip {}", info.next_stage_label))
+                    .clicked()
+                {
+                    state.confirm = Some(Confirm::Skip(info.next_stage_index));
+                }
+                if ui.add_enabled(on, Button::new("Set due date")).clicked() {
+                    state.due_pick = Some(info.due_on.unwrap_or(v.today));
+                }
+                // A plain button (not a nested ui), so the row can wrap it.
+                let menu = ui.add_enabled(
+                    on,
+                    Button::new(format!("Mark N/A / Unassign  {}", icon::CARET_DOWN)),
+                );
+                egui::Popup::menu(&menu).show(|ui| {
                     if ui.button("Mark N/A").clicked() {
                         op = Some(Op::Assign(Some(AssignState::Na)));
                     }
@@ -279,17 +315,17 @@ fn actions(
                         state.confirm = Some(Confirm::Unassign);
                     }
                 });
-            });
-        }
-        Some(AssignState::Na) | None => {
-            if ui
-                .add_enabled(on, Button::new(format!("{}  Assign", icon::PLUS)))
-                .clicked()
-            {
-                op = Some(Op::Assign(Some(AssignState::Assigned)));
             }
-            if assign.is_some() && ui.add_enabled(on, Button::new("Unassign")).clicked() {
-                state.confirm = Some(Confirm::Unassign);
+            Some(AssignState::Na) | None => {
+                if ui
+                    .add_enabled(on, Button::new(format!("{}  Assign", icon::PLUS)))
+                    .clicked()
+                {
+                    op = Some(Op::Assign(Some(AssignState::Assigned)));
+                }
+                if assign.is_some() && ui.add_enabled(on, Button::new("Unassign")).clicked() {
+                    state.confirm = Some(Confirm::Unassign);
+                }
             }
         }
     });
@@ -361,8 +397,11 @@ fn actions(
             op = o.or(op);
         }
     }
-    if let Some(o) = form(ui, v, state, info) {
-        op = Some(o);
+    // Editing an entry happens in the entry itself, down in the history.
+    if !editing_entry(state) {
+        if let Some(o) = form(ui, v, state, info) {
+            op = Some(o);
+        }
     }
     op
 }
@@ -515,19 +554,24 @@ fn confirm_row(ui: &mut egui::Ui, pal: &Palette, text: &str, yes: &str) -> Optio
     answer
 }
 
-fn tag(ui: &mut egui::Ui, text: &str, fill: egui::Color32, fg: egui::Color32) {
-    Frame::new()
-        .fill(fill)
-        .corner_radius(255)
-        .inner_margin(Margin::symmetric(8, 2))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).size(11.5).color(fg));
-        });
+fn section_title(ui: &mut egui::Ui, pal: &Palette, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .family(medium())
+            .size(15.0)
+            .color(pal.text),
+    );
+    ui.add_space(2.0);
 }
 
+/// Who recorded an entry and when; only shown once the entry is opened.
 fn by_line(ui: &mut egui::Ui, pal: &Palette, by: &str, at: Ts) {
-    let text = format!("by {by} \u{b7} {}", at.format("%-d %b %Y %H:%M"));
-    ui.label(RichText::new(text).size(12.0).color(pal.muted));
+    let text = format!(
+        "Recorded by {by} on {} at {}",
+        fmt_date(at.date_naive()),
+        at.format("%H:%M")
+    );
+    ui.label(RichText::new(text).size(12.5).color(pal.muted));
 }
 
 /// The visible entries and the "Show N older entries" link.
@@ -544,11 +588,27 @@ fn history_list(
     }
     let mut op = None;
     let (shown, hidden) = split_history(entries, state.expanded);
+    // The rail joining the entries' dots, drawn behind them once they're placed.
+    let rail = ui.painter().add(egui::Shape::Noop);
+    let mut dots = Vec::with_capacity(shown.len());
     for e in shown {
-        ui.add_space(6.0);
-        if let Some(o) = entry(ui, v, state, e, pair) {
+        ui.add_space(4.0);
+        let (dot, o) = entry(ui, v, state, e, pair);
+        dots.push(dot);
+        if let Some(o) = o {
             op = Some(o);
         }
+    }
+    if let (Some(first), Some(last)) = (dots.first(), dots.last()) {
+        // Older entries continue below: the rail runs on, fading out.
+        let end = if hidden > 0 { last.y + 22.0 } else { last.y };
+        ui.painter().set(
+            rail,
+            egui::Shape::line_segment(
+                [*first, Pos2::new(first.x, end)],
+                Stroke::new(2.0, v.pal.border),
+            ),
+        );
     }
     ui.add_space(6.0);
     if hidden > 0 {
@@ -562,112 +622,231 @@ fn history_list(
     op
 }
 
+/// Width of the column holding the rail and the entries' dots.
+const RAIL_W: f32 = 22.0;
+
+/// One history entry beside the rail: what matters (the completion date
+/// and stage) on its first line, and everything else (who recorded it and
+/// when, the comment, edit and delete) behind its "details" toggle.
+/// Returns the centre of its dot on the rail.
 fn entry(
     ui: &mut egui::Ui,
     v: &View,
     state: &mut DetailState,
     e: &HistoryEntry,
     pair: &PairState,
-) -> Option<Op> {
+) -> (Pos2, Option<Op>) {
     let pal = v.pal;
     let mut op = None;
-    let line = |text: String| RichText::new(text).family(medium()).color(pal.text);
-    ui.spacing_mut().item_spacing.y = 4.0;
-    match *e {
-        HistoryEntry::Completion(r) => {
-            let label = if r.stage_label.is_empty() {
-                stage_label(v.rule, r.stage_index)
-            } else {
-                r.stage_label.clone()
-            };
+    let id = match *e {
+        HistoryEntry::Completion(r) => r.id.clone(),
+        HistoryEntry::Delay(n) => n.id.clone(),
+        HistoryEntry::Note(n) => n.id.clone(),
+    };
+    let open = state.open_entries.contains(&id);
+    let mut toggle = false;
+    let lead = |text: String| {
+        RichText::new(text)
+            .family(medium())
+            .size(15.0)
+            .color(pal.text)
+    };
+    let row_top = ui.cursor().top();
+    let (dot_color, hollow) = match *e {
+        HistoryEntry::Completion(r) => (stage_color(pal, stage_kind(v.rule, r.stage_index)), false),
+        HistoryEntry::Delay(_) => (pal.yellow_fg, true),
+        HistoryEntry::Note(_) => (pal.muted, true),
+    };
+    ui.horizontal_top(|ui| {
+        ui.add_space(RAIL_W);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.horizontal(|ui| {
-                ui.label(line(format!("{label} \u{b7} {}", fmt_date(r.completed_on))));
-                if v.editing {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, pal, icon::TRASH, "Delete entry").clicked() {
-                            state.confirm = Some(Confirm::DeleteRecord(r.id.clone()));
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let summary = match *e {
+                    HistoryEntry::Completion(r) => {
+                        let label = if r.stage_label.is_empty() {
+                            stage_label(v.rule, r.stage_index)
+                        } else {
+                            r.stage_label.clone()
+                        };
+                        let date = fmt_date(r.completed_on);
+                        ui.label(lead(date.clone()));
+                        stage_chip(ui, pal, v.rule, r.stage_index, &label);
+                        let tolerance = v.data.settings.variance_tolerance_days;
+                        if let Some(t) = completion_variance(v.rule, pair, &r.id)
+                            .and_then(|d| variance_tag(d, tolerance))
+                        {
+                            ui.label(RichText::new(t).size(12.5).color(pal.muted));
                         }
-                        if icon_button(ui, pal, icon::PENCIL_SIMPLE, "Edit entry").clicked() {
-                            state.form = DetailForm::EditRecord {
-                                id: r.id.clone(),
-                                date: r.completed_on,
-                                stage: r.stage_index,
-                                comment: r.comment.clone(),
-                            };
-                            state.error = None;
+                        if r.unconfirmed {
+                            ui.label(RichText::new("unconfirmed").size(12.5).color(pal.yellow_fg))
+                                .on_hover_text("Imported from Excel and not yet confirmed");
                         }
-                    });
-                }
+                        format!("{label}, {date}")
+                    }
+                    HistoryEntry::Delay(n) => {
+                        ui.label(lead("Delay note".to_owned()));
+                        let stage = stage_label(v.rule, n.for_stage_index);
+                        stage_chip(ui, pal, v.rule, n.for_stage_index, &stage);
+                        format!("delay note for {stage}")
+                    }
+                    HistoryEntry::Note(n) => {
+                        ui.label(lead("Note".to_owned()));
+                        ui.label(
+                            RichText::new(fmt_date(n.at.date_naive()))
+                                .size(12.5)
+                                .color(pal.muted),
+                        );
+                        format!("note from {}", fmt_date(n.at.date_naive()))
+                    }
+                };
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let (glyph, verb) = if open {
+                        (icon::CARET_UP, "Hide")
+                    } else {
+                        (icon::CARET_DOWN, "Show")
+                    };
+                    toggle = icon_button(ui, pal, glyph, &format!("{verb} details of {summary}"))
+                        .clicked();
+                });
             });
-            if !r.comment.is_empty() {
-                ui.label(RichText::new(&r.comment).color(pal.text));
-            }
-            by_line(ui, pal, &r.by, r.at);
-            let tolerance = v.data.settings.variance_tolerance_days;
-            let variance =
-                completion_variance(v.rule, pair, &r.id).and_then(|d| variance_tag(d, tolerance));
-            if r.unconfirmed || variance.is_some() {
-                ui.horizontal(|ui| {
-                    if r.unconfirmed {
-                        tag(
-                            ui,
-                            "unconfirmed \u{2013} from Excel",
-                            pal.yellow_bg,
-                            pal.yellow_fg,
+            // A delay's reason and a note's text are the point of them, so
+            // they stay in view.
+            match *e {
+                HistoryEntry::Delay(n) => {
+                    ui.label(RichText::new(&n.note).color(pal.text));
+                    if let Some(d) = n.expected_on {
+                        ui.label(
+                            RichText::new(format!("Expected by {}", fmt_date(d)))
+                                .size(12.5)
+                                .color(pal.muted),
                         );
                     }
-                    if let Some(t) = &variance {
-                        tag(ui, t, pal.grey_bg, pal.grey_fg);
-                    }
-                });
+                }
+                HistoryEntry::Note(n) => {
+                    ui.label(RichText::new(&n.text).color(pal.text));
+                }
+                HistoryEntry::Completion(_) => {}
             }
-            if state.confirm == Some(Confirm::DeleteRecord(r.id.clone())) {
-                if let Some(yes) = confirm_row(
-                    ui,
-                    pal,
-                    "Delete this entry? This can't be undone.",
-                    "Delete",
-                ) {
-                    state.confirm = None;
-                    if yes {
-                        op = Some(Op::DeleteRecord(r.id.clone()));
+            if open {
+                details(ui, v, state, e, &mut op);
+            }
+        });
+    });
+    if toggle && !state.open_entries.remove(&id) {
+        state.open_entries.insert(id);
+    }
+    let dot = Pos2::new(ui.max_rect().left() + 8.0, row_top + 16.0);
+    let p = ui.painter();
+    p.circle_filled(dot, 7.5, pal.card);
+    if hollow {
+        p.circle_stroke(dot, 4.5, Stroke::new(2.0, dot_color));
+    } else {
+        p.circle_filled(dot, 5.5, dot_color);
+    }
+    (dot, op)
+}
+
+/// An opened entry: comment or note text, who recorded it, and (while
+/// editing) its actions with their confirmation.
+fn details(
+    ui: &mut egui::Ui,
+    v: &View,
+    state: &mut DetailState,
+    e: &HistoryEntry,
+    op: &mut Option<Op>,
+) {
+    let pal = v.pal;
+    Frame::new()
+        .fill(pal.bg)
+        .corner_radius(8)
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
+            match *e {
+                HistoryEntry::Completion(r) => {
+                    if !r.comment.is_empty() {
+                        ui.label(RichText::new(&r.comment).color(pal.text));
+                    }
+                    by_line(ui, pal, &r.by, r.at);
+                    if r.unconfirmed {
+                        ui.label(
+                            RichText::new("Imported from Excel and not yet confirmed.")
+                                .size(12.5)
+                                .color(pal.yellow_fg),
+                        );
+                    }
+                    let editing_this = matches!(
+                        &state.form,
+                        DetailForm::EditRecord { id, .. } if *id == r.id
+                    );
+                    if editing_this {
+                        // The form opens right here, where Edit was clicked.
+                        if let Some(o) = form(ui, v, state, v.info) {
+                            *op = Some(o);
+                        }
+                        if let Some(e) = &state.error {
+                            ui.label(RichText::new(e).color(pal.red_fg));
+                        }
+                    } else if v.editing {
+                        ui.horizontal(|ui| {
+                            let edit = Button::new(format!("{}  Edit", icon::PENCIL_SIMPLE));
+                            if ui.add(edit).clicked() {
+                                state.form = DetailForm::EditRecord {
+                                    id: r.id.clone(),
+                                    date: r.completed_on,
+                                    stage: r.stage_index,
+                                    comment: r.comment.clone(),
+                                };
+                                state.error = None;
+                            }
+                            let delete = Button::new(
+                                RichText::new(format!("{}  Delete", icon::TRASH)).color(pal.red_fg),
+                            );
+                            if ui.add(delete).clicked() {
+                                state.confirm = Some(Confirm::DeleteRecord(r.id.clone()));
+                            }
+                        });
+                    }
+                    if state.confirm == Some(Confirm::DeleteRecord(r.id.clone())) {
+                        if let Some(yes) = confirm_row(
+                            ui,
+                            pal,
+                            "Delete this entry? This can't be undone.",
+                            "Delete",
+                        ) {
+                            state.confirm = None;
+                            if yes {
+                                *op = Some(Op::DeleteRecord(r.id.clone()));
+                            }
+                        }
                     }
                 }
-            }
-        }
-        HistoryEntry::Delay(n) => {
-            ui.horizontal(|ui| {
-                let stage = stage_label(v.rule, n.for_stage_index);
-                ui.label(line(format!("{}  Delay note \u{b7} {stage}", icon::PAUSE)));
-                if v.editing {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, pal, icon::TRASH, "Delete delay note").clicked() {
+                HistoryEntry::Delay(n) => {
+                    by_line(ui, pal, &n.by, n.at);
+                    if v.editing {
+                        let delete = Button::new(
+                            RichText::new(format!("{}  Delete", icon::TRASH)).color(pal.red_fg),
+                        );
+                        if ui.add(delete).clicked() {
                             state.confirm = Some(Confirm::DeleteDelay(n.id.clone()));
                         }
-                    });
-                }
-            });
-            ui.label(RichText::new(&n.note).color(pal.text));
-            if let Some(d) = n.expected_on {
-                ui.label(RichText::new(format!("Expected by {}", fmt_date(d))).color(pal.muted));
-            }
-            by_line(ui, pal, &n.by, n.at);
-            if state.confirm == Some(Confirm::DeleteDelay(n.id.clone())) {
-                if let Some(yes) = confirm_row(ui, pal, "Delete this delay note?", "Delete") {
-                    state.confirm = None;
-                    if yes {
-                        op = Some(Op::DeleteDelay(n.id.clone()));
+                    }
+                    if state.confirm == Some(Confirm::DeleteDelay(n.id.clone())) {
+                        if let Some(yes) = confirm_row(ui, pal, "Delete this delay note?", "Delete")
+                        {
+                            state.confirm = None;
+                            if yes {
+                                *op = Some(Op::DeleteDelay(n.id.clone()));
+                            }
+                        }
                     }
                 }
+                HistoryEntry::Note(n) => by_line(ui, pal, &n.by, n.at),
             }
-        }
-        HistoryEntry::Note(n) => {
-            ui.label(line(format!("{}  Note", icon::CHAT_CIRCLE)));
-            ui.label(RichText::new(&n.text).color(pal.text));
-            by_line(ui, pal, &n.by, n.at);
-        }
-    }
-    op
+        });
 }
 
 /// Runs `op` through the audited operations; reports failures inline.

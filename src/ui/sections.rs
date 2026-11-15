@@ -439,14 +439,16 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
     } else {
         Some(section.id.as_str())
     };
-    // Sections on the left, the view switch on the right.
+    // Sections on the left, the view switch on the right. The switch is
+    // placed first, so on a narrow page the sections wrap beside it.
     let picked = ui
-        .horizontal(|ui| {
-            let picked = section_pills(ui, pal, &sections, current);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                view_switch(ui, pal, &mut state.view);
-            });
-            picked
+        .with_layout(Layout::right_to_left(Align::Min), |ui| {
+            view_switch(ui, pal, &mut state.view);
+            ui.add_space(12.0);
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                section_pills(ui, pal, &sections, current)
+            })
+            .inner
         })
         .inner;
     if let Some(picked) = picked {

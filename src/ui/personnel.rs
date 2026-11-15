@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::NaiveDate;
-use egui::{Align, Button, Frame, Layout, Margin, Modal, Popup, RichText, Stroke, TextEdit};
+use egui::{Align, Button, Frame, Layout, Margin, Modal, Popup, RichText, Stroke, TextEdit, Vec2};
 use egui_phosphor::regular as icon;
 
 use crate::dates::fmt_date;
@@ -18,7 +18,7 @@ use crate::ui::app::{Ctx, Toast};
 use crate::ui::staff_editor::{self, StaffForm};
 use crate::ui::theme::{heading, medium, serif, Palette};
 use crate::ui::widgets::{
-    chip_select, due_pill, empty_state, icon_button, search_box, segmented, SEARCH_W,
+    chip_select, due_pill, due_pill_text, empty_state, icon_button, search_box, segmented, SEARCH_W,
 };
 
 #[derive(Default)]
@@ -513,8 +513,10 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
         .inner_margin(Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            egui::Grid::new("staff_table")
-                .num_columns(7)
+            let (sections_w, narrow) = sections_width(ui, pal, &staff, sums);
+            // Its own id per shape, so column widths never carry across.
+            egui::Grid::new(("staff_table", narrow))
+                .num_columns(if narrow { 5 } else { 7 })
                 .spacing([20.0, 10.0])
                 .show(ui, |ui| {
                     let all = staff.iter().all(|s| selected.contains(&s.id));
@@ -531,6 +533,9 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                         }
                     }
                     for head in ["Name", "Title", "Joined", "Sections", "Next due", ""] {
+                        if narrow && matches!(head, "Title" | "Joined") {
+                            continue;
+                        }
                         ui.label(RichText::new(head).color(pal.muted).size(12.5));
                     }
                     ui.end_row();
@@ -552,15 +557,20 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                         if ui.add(name).clicked() {
                             open = Some(s.id.clone());
                         }
-                        ui.label(RichText::new(&s.title).color(pal.muted));
-                        ui.label(
-                            RichText::new(s.joined.map_or("\u{2014}".to_owned(), fmt_date))
-                                .color(pal.muted),
-                        );
+                        if !narrow {
+                            ui.label(RichText::new(&s.title).color(pal.muted));
+                            ui.label(
+                                RichText::new(s.joined.map_or("\u{2014}".to_owned(), fmt_date))
+                                    .color(pal.muted),
+                            );
+                        }
                         let sum = sums.get(&s.id);
-                        ui.horizontal(|ui| {
-                            section_chips(ui, pal, sum.map_or(&[], |m| m.sections.as_slice()))
-                        });
+                        section_chips(
+                            ui,
+                            pal,
+                            sum.map_or(&[], |m| m.sections.as_slice()),
+                            sections_w,
+                        );
                         match sum.and_then(|m| m.next.as_ref()) {
                             Some((info, status)) => {
                                 due_pill(ui, pal, info, *status, false);
@@ -755,7 +765,7 @@ fn filters(
         .into_iter()
         .map(|t| (t.clone(), t))
         .collect();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         search_box(ui, &mut f.text, "Search by name", SEARCH_W);
         let tabs = [StaffStatus::Active, StaffStatus::Removed];
         let current = usize::from(f.status.unwrap_or(StaffStatus::Active) != StaffStatus::Active);
@@ -774,37 +784,157 @@ fn filters(
             f.title = None;
             f.text.clear();
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        let add = |ui: &mut egui::Ui| {
             let add = ui.add_enabled(editing, Button::new(format!("{}  Add staff", icon::PLUS)));
-            if add
-                .on_disabled_hover_text("Start editing to make changes")
+            add.on_disabled_hover_text("Start editing to make changes")
                 .clicked()
-            {
-                *add_staff = true;
-            }
-        });
+        };
+        // Right-aligned when it fits on this line; otherwise it wraps below.
+        let clicked = if ui.available_width() >= 130.0 {
+            ui.with_layout(Layout::right_to_left(Align::Center), add)
+                .inner
+        } else {
+            add(ui)
+        };
+        if clicked {
+            *add_staff = true;
+        }
     });
 }
 
-/// Up to three section chips, then "+N".
-fn section_chips(ui: &mut egui::Ui, pal: &Palette, names: &[String]) {
-    if names.is_empty() {
-        ui.label(RichText::new("\u{2014}").color(pal.muted));
-    }
-    let chip = |ui: &mut egui::Ui, text: &str| {
-        Frame::new()
-            .fill(pal.grey_bg)
-            .corner_radius(255)
-            .inner_margin(Margin::symmetric(8, 2))
-            .show(ui, |ui| {
-                ui.label(RichText::new(text).size(11.5).color(pal.grey_fg));
-            });
+const CHIP_SIZE: f32 = 11.5;
+const CHIP_PAD: i8 = 8;
+const CHIP_GAP: f32 = 6.0;
+
+fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::proportional(CHIP_SIZE),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x
+        + 2.0 * f32::from(CHIP_PAD)
+}
+
+/// The Sections column's width: wide enough for everyone's chips on one
+/// line, unless the other columns need the room (then the chips wrap).
+/// Also whether the table is too narrow for the Title and Joined columns
+/// (each person's profile still shows both).
+fn sections_width(
+    ui: &egui::Ui,
+    pal: &Palette,
+    staff: &[&Staff],
+    sums: &HashMap<Id, Summary>,
+) -> (f32, bool) {
+    let text = |t: &str, family: egui::FontFamily| {
+        let size = egui::TextStyle::Body.resolve(ui.style()).size;
+        ui.painter()
+            .layout_no_wrap(t.to_owned(), egui::FontId::new(size, family), pal.text)
+            .size()
+            .x
     };
-    for n in names.iter().take(3) {
-        chip(ui, n);
+    let widest = |f: &dyn Fn(&Staff) -> f32| staff.iter().map(|s| f(s)).fold(0.0, f32::max);
+    // Names are frameless buttons, which keep their padding.
+    let name = widest(&|s| text(&s.name, medium())) + 2.0 * ui.spacing().button_padding.x;
+    let title = widest(&|s| text(&s.title, egui::FontFamily::Proportional)).max(30.0);
+    let joined = text("28 Dec 2026", egui::FontFamily::Proportional);
+    let pill = widest(&|s| {
+        sums.get(&s.id)
+            .and_then(|m| m.next.as_ref())
+            .map_or(20.0, |(info, _)| {
+                ui.painter()
+                    .layout_no_wrap(
+                        format!("{} {}", icon::PAUSE, due_pill_text(info)),
+                        egui::FontId::proportional(12.5),
+                        pal.text,
+                    )
+                    .size()
+                    .x
+                    + 20.0
+            })
+    });
+    // Checkbox, the row menu, the gaps between seven columns, and some slack.
+    let others = 20.0 + name + title + joined + pill + 32.0 + 6.0 * 20.0 + 12.0;
+    let chips = widest(&|s| {
+        let names = sums.get(&s.id).map_or(&[][..], |m| m.sections.as_slice());
+        // A little slack so rounding never pushes the last chip onto a new line.
+        names
+            .iter()
+            .map(|n| chip_width(ui, n) + CHIP_GAP)
+            .sum::<f32>()
+            + 4.0
+    });
+    let mut room = ui.available_width() - others;
+    let narrow = room < MIN_SECTIONS_W;
+    if narrow {
+        room += title + joined + 2.0 * 20.0;
     }
-    if names.len() > 3 {
-        chip(ui, &format!("+{}", names.len() - 3));
+    (chips.min(room).max(MIN_SECTIONS_W), narrow)
+}
+
+/// The Sections column never gets narrower than this.
+const MIN_SECTIONS_W: f32 = 160.0;
+
+/// Every section the person has tests in, as chips, `width` wide: on one
+/// line when they fit, otherwise on as many lines as they need (each chip
+/// whole). The lines are worked out here, so the row's height is known.
+fn section_chips(ui: &mut egui::Ui, pal: &Palette, names: &[String], width: f32) {
+    if names.is_empty() {
+        ui.allocate_ui(Vec2::new(width, 0.0), |ui| {
+            ui.set_width(width);
+            ui.label(RichText::new("\u{2014}").color(pal.muted));
+        });
+        return;
+    }
+    let galleys: Vec<_> = names
+        .iter()
+        .map(|n| {
+            ui.painter().layout_no_wrap(
+                n.clone(),
+                egui::FontId::proportional(CHIP_SIZE),
+                pal.grey_fg,
+            )
+        })
+        .collect();
+    let chip_w = |g: &std::sync::Arc<egui::Galley>| g.size().x + 2.0 * f32::from(CHIP_PAD);
+    let mut lines: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut x = 0.0;
+    for (i, g) in galleys.iter().enumerate() {
+        let w = chip_w(g);
+        let line = lines.last_mut().expect("never empty");
+        if !line.is_empty() && x + w > width {
+            lines.push(vec![i]);
+            x = w + CHIP_GAP;
+        } else {
+            line.push(i);
+            x += w + CHIP_GAP;
+        }
+    }
+    let chip_h = galleys[0].size().y + 4.0;
+    let line_gap = 5.0;
+    let height = lines.len() as f32 * (chip_h + line_gap) - line_gap;
+    let (block, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    for (row, line) in lines.iter().enumerate() {
+        let mut x = block.left();
+        let y = block.top() + row as f32 * (chip_h + line_gap);
+        for &i in line {
+            let g = galleys[i].clone();
+            let rect = egui::Rect::from_min_size(egui::pos2(x, y), Vec2::new(chip_w(&g), chip_h));
+            x = rect.right() + CHIP_GAP;
+            if ui.is_rect_visible(rect) {
+                ui.painter().rect_filled(rect, 255, pal.grey_bg);
+                ui.painter()
+                    .galley(rect.center() - g.size() / 2.0, g, pal.grey_fg);
+            }
+            // Named for screen readers; each chip's place keeps its id unique.
+            let id = egui::Id::new(("section_chip", rect.min.x as i32, rect.min.y as i32));
+            let resp = ui.interact(rect, id, egui::Sense::hover());
+            resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &names[i])
+            });
+        }
     }
 }
 
@@ -994,11 +1124,9 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(&sec.name).strong().size(15.5).color(pal.text));
                 for t in tests {
+                    // The pill first, from the right; the name takes what's
+                    // left and is shortened (in full on hover) when it must be.
                     ui.horizontal(|ui| {
-                        let name = Button::new(RichText::new(&t.name).color(pal.text)).frame(false);
-                        if ui.add(name).clicked() {
-                            picked = Some((staff.id.clone(), t.id.clone()));
-                        }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             match staff.assignments[&t.id].state {
                                 AssignState::Na => {
@@ -1014,6 +1142,15 @@ fn profile(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                                     }
                                 }
                             }
+                            ui.add_space(8.0);
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                let name = Button::new(RichText::new(&t.name).color(pal.text))
+                                    .frame(false)
+                                    .wrap_mode(egui::TextWrapMode::Truncate);
+                                if ui.add(name).on_hover_text(&t.name).clicked() {
+                                    picked = Some((staff.id.clone(), t.id.clone()));
+                                }
+                            });
                         });
                     });
                 }

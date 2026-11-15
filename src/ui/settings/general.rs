@@ -6,9 +6,11 @@ use egui::{Button, DragValue, Grid, RichText};
 use super::{apply, card};
 use crate::model::Settings;
 use crate::ops;
+use crate::prefs::DISPLAY_SCALES;
 use crate::snapshot::archive_old;
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::Palette;
+use crate::ui::widgets::segmented;
 
 /// Defaults when an optional setting is switched on.
 const INITIAL_DUE_DEFAULT: i64 = 30;
@@ -28,6 +30,7 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut GeneralTab) {
         st.draft = Some((saved.clone(), saved.clone()));
     }
     let (_, draft) = st.draft.as_mut().expect("synced above");
+    display(ui, pal, cx.display_scale);
     let mut save = false;
     card(ui, pal, "Due dates and editing", |ui| {
         ui.add_enabled_ui(editing, |ui| fields(ui, pal, draft));
@@ -60,6 +63,30 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut GeneralTab) {
     }
     archive(ui, cx, &saved);
     data_folder(ui, cx);
+}
+
+/// The display scale: this computer's own choice, so it needs no edit mode
+/// and applies at once.
+fn display(ui: &mut egui::Ui, pal: &Palette, scale: &mut f32) {
+    card(ui, pal, "Display", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Display scale");
+            ui.add_space(8.0);
+            let labels = DISPLAY_SCALES.map(|s| format!("{:.0}%", s * 100.0));
+            let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+            let current = DISPLAY_SCALES
+                .iter()
+                .position(|s| (s - *scale).abs() < 0.001)
+                .unwrap_or(1);
+            if let Some(i) = segmented(ui, pal, current, &labels) {
+                *scale = DISPLAY_SCALES[i];
+            }
+        });
+        ui.label(
+            RichText::new("Makes text and controls larger or smaller. Only changes this computer.")
+                .color(pal.muted),
+        );
+    });
 }
 
 fn fields(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings) {
