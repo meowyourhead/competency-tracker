@@ -622,6 +622,115 @@ fn profile_opens_detail_for_a_test() {
     h.get_by_label("Bram");
 }
 
+fn go_settings_tab(h: &mut Harness<'static, TrackerApp>, tab: &str) {
+    button(h, "Settings").click();
+    h.run();
+    button(h, tab).click();
+    h.run();
+}
+
+#[test]
+fn rename_section_reflects_in_nav() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    go_settings_tab(&mut h, "Sections & tests");
+    button(&h, "Chemistry").click();
+    h.run();
+    // The field starts with the whole name selected: typing replaces it.
+    h.event(egui::Event::Text("Clinical Chemistry".into()));
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(h.state().session().data().sections_sorted()[0].name, "Clinical Chemistry");
+    button(&h, "Sections").click();
+    h.run();
+    button(&h, "Clinical Chemistry");
+    assert!(!has_button(&h, "Chemistry"), "the old name is gone from the section tabs");
+}
+
+#[test]
+fn audit_filter_by_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        let entry = |by: &str, detail: &str| competency_tracker::model::AuditEntry {
+            at: now_ts(),
+            by: by.into(),
+            action: "staff.add".into(),
+            detail: detail.into(),
+            refs: Default::default(),
+        };
+        d.audit.push(entry("jtan", "Added Bob to personnel"));
+        d.audit.push(entry("mlee", "Added Cara to personnel"));
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    button(&h, "Audit log").click();
+    h.run();
+    h.get_by_label("Added Bob to personnel");
+    h.get_by_label("Added Cara to personnel");
+    h.get_by_label_contains("User").click();
+    h.run();
+    h.get_by_label("mlee").click();
+    h.run();
+    assert!(h.query_by_label("Added Bob to personnel").is_none(), "jtan's entry is filtered out");
+    h.get_by_label("Added Cara to personnel");
+}
+
+#[test]
+fn confirm_all_unconfirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        d.sections[0].tests = vec![TestSystem { id: "t-cobas".into(), name: "Cobas".into(), order: 0, retired: false, rule_id: None }];
+        d.staff.push(staff("p-agnes", "Agnes", "MLT", "t-cobas"));
+        for i in 0..2u64 {
+            let mut r = initial("p-agnes", "t-cobas", 400 - i * 200);
+            r.id = format!("r-{i}");
+            r.stage_index = i as u32;
+            r.imported = true;
+            r.unconfirmed = true;
+            d.records.push(r);
+        }
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    go_settings_tab(&mut h, "Import & export");
+    button(&h, "Confirm all").click();
+    h.run();
+    assert_eq!(h.state().session().data().records.iter().filter(|r| r.unconfirmed).count(), 2, "asks first");
+    h.get_by_label("Confirm all 2 records?");
+    button(&h, "Confirm").click();
+    h.run();
+    assert_eq!(h.state().session().data().records.iter().filter(|r| r.unconfirmed).count(), 0);
+}
+
+#[test]
+fn settings_change_recomputes_pills() {
+    let dir = tempfile::tempdir().unwrap();
+    // Agnes's Semi-annual falls due 45 days from today.
+    let today = now_ts().date_naive();
+    let done = (today + chrono::Days::new(45)).checked_sub_months(chrono::Months::new(6)).unwrap();
+    let mut h = seeded(&dir, (today - done).num_days() as u64);
+    h.get_by_label("Due within 30 days 0");
+    go_settings_tab(&mut h, "General");
+    let due_soon = h.query_all_by_role(egui::accesskit::Role::SpinButton).next().expect("due-soon field");
+    due_soon.click();
+    h.run();
+    h.event(egui::Event::Text("60".into()));
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    button(&h, "Save settings").click();
+    h.run();
+    assert_eq!(h.state().session().data().settings.due_soon_days, 60);
+    button(&h, "Summary").click();
+    h.run();
+    h.get_by_label("Due within 60 days 1");
+}
+
 /// The Summary page's search box (the last text input in the tree).
 fn summary_search<'a>(h: &'a Harness<'static, TrackerApp>) -> egui_kittest::Node<'a> {
     h.query_all_by_role(egui::accesskit::Role::TextInput).last().expect("search box")

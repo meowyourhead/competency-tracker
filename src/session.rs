@@ -203,6 +203,11 @@ impl Session {
         &self.me.user
     }
 
+    /// The shared data folder this session reads and saves.
+    pub fn data_dir(&self) -> &DataDir {
+        &self.dir
+    }
+
     pub fn save_error(&self) -> Option<&str> {
         self.save_error.as_deref()
     }
