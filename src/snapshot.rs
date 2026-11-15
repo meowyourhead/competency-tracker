@@ -48,16 +48,38 @@ impl DataDir {
 /// beside the exe (relative paths resolve against the exe dir). An unreadable
 /// or invalid config falls back to the default.
 pub fn resolve_data_dir(exe_dir: &Path) -> DataDir {
+    resolve_data_dir_with_source(exe_dir).0
+}
+
+/// As [`resolve_data_dir`], also saying whether `tracker.config.json` chose it.
+pub fn resolve_data_dir_with_source(exe_dir: &Path) -> (DataDir, bool) {
     let configured = fs::read_to_string(exe_dir.join(CONFIG_FILE))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("data_dir").and_then(|d| d.as_str()).map(str::to_owned))
         .filter(|s| !s.trim().is_empty());
+    let from_config = configured.is_some();
     let root = match configured {
         Some(dir) => exe_dir.join(dir.trim()),
         None => exe_dir.join(DEFAULT_DIR),
     };
-    DataDir { root }
+    (DataDir { root }, from_config)
+}
+
+/// The first-run question shown before a missing data folder is created, or
+/// `None` when the folder already exists.
+pub fn first_run_prompt(dir: &DataDir, from_config: bool) -> Option<String> {
+    if dir.root.exists() {
+        return None;
+    }
+    // Show a full path (".." resolved) even when the config gave a relative one.
+    let path = std::path::absolute(&dir.root).unwrap_or_else(|_| dir.root.clone());
+    let source = if from_config {
+        "This location comes from tracker.config.json."
+    } else {
+        "This is in the same folder as the application."
+    };
+    Some(format!("No data folder was found. A new data folder will be created here:\n\n{}\n\n{source}", path.display()))
 }
 
 pub fn sanitize_user(user: &str) -> String {
@@ -410,6 +432,34 @@ mod tests {
         assert_eq!(resolve_data_dir(exe).root, exe.join("CompetencyData"));
         fs::write(exe.join("tracker.config.json"), r#"{"data_dir":"  "}"#).unwrap();
         assert_eq!(resolve_data_dir(exe).root, exe.join("CompetencyData"));
+    }
+
+    #[test]
+    fn first_run_prompt_only_when_folder_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path();
+        let (dir, from_config) = resolve_data_dir_with_source(exe);
+        assert!(!from_config);
+        let text = first_run_prompt(&dir, from_config).expect("missing folder asks");
+        assert!(text.starts_with("No data folder was found. A new data folder will be created here:\n\n"));
+        assert!(text.contains(&exe.join("CompetencyData").display().to_string()));
+        assert!(text.ends_with("This is in the same folder as the application."));
+
+        fs::create_dir_all(&dir.root).unwrap();
+        assert_eq!(first_run_prompt(&dir, from_config), None, "existing folder: no question");
+    }
+
+    #[test]
+    fn first_run_prompt_names_config_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path();
+        fs::write(exe.join("tracker.config.json"), r#"{"data_dir":"Shared\\Data"}"#).unwrap();
+        let (dir, from_config) = resolve_data_dir_with_source(exe);
+        assert!(from_config);
+        let text = first_run_prompt(&dir, from_config).unwrap();
+        assert!(text.contains(&exe.join("Shared\\Data").display().to_string()));
+        assert!(text.ends_with("This location comes from tracker.config.json."));
+        assert!(!text.contains("same folder as the application"));
     }
 
     #[test]

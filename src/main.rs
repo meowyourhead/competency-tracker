@@ -8,7 +8,7 @@ use competency_tracker::dates::now_ts;
 use competency_tracker::identity::{machine_name, windows_username};
 use competency_tracker::prefs::{load_prefs_from, prefs_path, Prefs};
 use competency_tracker::session::Session;
-use competency_tracker::snapshot::resolve_data_dir;
+use competency_tracker::snapshot::{first_run_prompt, resolve_data_dir_with_source};
 use competency_tracker::ui::app::TrackerApp;
 
 const TITLE: &str = "Competency Tracker";
@@ -16,7 +16,19 @@ const TITLE: &str = "Competency Tracker";
 fn open_session() -> Result<Session, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't locate the program file: {e}"))?;
     let exe_dir = exe.parent().ok_or("Couldn't locate the program folder")?;
-    let dir = resolve_data_dir(exe_dir);
+    let (dir, from_config) = resolve_data_dir_with_source(exe_dir);
+    if let Some(question) = first_run_prompt(&dir, from_config) {
+        let answer = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Info)
+            .set_title(TITLE)
+            .set_description(question)
+            .set_buttons(rfd::MessageButtons::OkCancel)
+            .show();
+        if answer != rfd::MessageDialogResult::Ok {
+            // Cancelled: leave the disk untouched.
+            std::process::exit(0);
+        }
+    }
     let root = dir.root.clone();
     Session::open(dir, &windows_username(), &machine_name(), std::process::id(), now_ts(), Instant::now())
         .map_err(|e| format!("Couldn't open the data folder {}:\n{e}", root.display()))
