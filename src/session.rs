@@ -6,8 +6,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::dates::now_ts;
 use crate::lock::{self, Acquire, LockInfo, HEARTBEAT_SECS};
 use crate::model::{AuditEntry, Data, Ts};
 use crate::ops::Actor;
@@ -82,6 +86,79 @@ pub struct Session {
     pending: Vec<SessionEvent>,
     /// Where `abandon` writes unsaved data (`%LOCALAPPDATA%\CompetencyTracker\rescue`).
     rescue_dir: PathBuf,
+    /// Interval of the background heartbeat thread; `None` = beat from `tick`.
+    heartbeat_every: Option<Duration>,
+    /// Running while Editing (when `heartbeat_every` is set and it could start).
+    heartbeat: Option<HeartbeatThread>,
+}
+
+/// State shared between a [`Session`] and its heartbeat thread.
+struct HeartbeatShared {
+    /// Cleared (under `io`) when editing ends; the thread then stops.
+    editing: AtomicBool,
+    /// Set by the thread when the lock turned out to belong to someone else.
+    lost: AtomicBool,
+    /// Held around each heartbeat and around the session's own lock-file
+    /// checks, so a late heartbeat can never recreate a released lock.
+    io: Mutex<()>,
+}
+
+impl HeartbeatShared {
+    fn guard(&self) -> MutexGuard<'_, ()> {
+        self.io.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Rewrites the lock's heartbeat every interval while Editing, independent of
+/// `tick`, which stops while the window is minimised or a blocking file dialog
+/// is open. Dropping it stops the thread.
+struct HeartbeatThread {
+    shared: Arc<HeartbeatShared>,
+    /// Dropping the sender wakes the sleeping thread so it exits at once.
+    _wake: mpsc::Sender<()>,
+}
+
+impl HeartbeatThread {
+    fn spawn(path: PathBuf, me: LockInfo, every: Duration) -> Option<HeartbeatThread> {
+        let shared = Arc::new(HeartbeatShared {
+            editing: AtomicBool::new(true),
+            lost: AtomicBool::new(false),
+            io: Mutex::new(()),
+        });
+        let (wake, sleep) = mpsc::channel::<()>();
+        let theirs = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("lock-heartbeat".into())
+            .spawn(move || {
+                while let Err(RecvTimeoutError::Timeout) = sleep.recv_timeout(every) {
+                    let _io = theirs.guard();
+                    if !theirs.editing.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    // An I/O error is retried at the next interval; a lock taken
+                    // over meanwhile is also caught by the owner check before every save.
+                    if let Ok(false) = lock::heartbeat(&path, &me, now_ts()) {
+                        theirs.lost.store(true, Ordering::SeqCst);
+                        theirs.editing.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(HeartbeatThread { shared, _wake: wake })
+    }
+
+    fn lost(&self) -> bool {
+        self.shared.lost.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for HeartbeatThread {
+    fn drop(&mut self) {
+        // Waits for a heartbeat in progress, so none follows the release.
+        let _io = self.shared.guard();
+        self.shared.editing.store(false, Ordering::SeqCst);
+    }
 }
 
 fn default_rescue_dir() -> PathBuf {
@@ -115,10 +192,13 @@ impl Session {
     /// If the data cannot be read, starts Viewing with `load_error` set and
     /// never takes the lock; polls keep retrying.
     pub fn open(dir: DataDir, user: &str, machine: &str, pid: u32, now: Ts, inst: Instant) -> io::Result<Session> {
-        Self::open_with(dir, user, machine, pid, now, inst, || {})
+        Self::open_with(dir, user, machine, pid, now, inst, Some(HEARTBEAT_EVERY), || {})
     }
 
-    /// `open` with a test hook that runs between the first load and the lock attempt.
+    /// `open` with test hooks: the heartbeat thread's interval (`None` = beat
+    /// from `tick` instead) and a hook that runs between the first load and
+    /// the lock attempt.
+    #[allow(clippy::too_many_arguments)]
     fn open_with(
         dir: DataDir,
         user: &str,
@@ -126,6 +206,7 @@ impl Session {
         pid: u32,
         now: Ts,
         inst: Instant,
+        heartbeat_every: Option<Duration>,
         before_acquire: impl FnOnce(),
     ) -> io::Result<Session> {
         dir.ensure()?;
@@ -153,6 +234,8 @@ impl Session {
             available_announced: false,
             pending: Vec::new(),
             rescue_dir: default_rescue_dir(),
+            heartbeat_every,
+            heartbeat: None,
         };
         if s.load(false).is_err() {
             return Ok(s);
@@ -327,7 +410,11 @@ impl Session {
         if !self.is_editing() {
             return Err("Not in edit mode".into());
         }
-        match lock::is_owner(&self.dir.lock_path(), &self.me) {
+        let io = self.lock_io();
+        let guard = io.as_ref().map(|s| s.guard());
+        let owner = lock::is_owner(&self.dir.lock_path(), &self.me);
+        drop(guard);
+        match owner {
             Ok(true) => {}
             Ok(false) => return Err(self.lose_lock(now)),
             Err(e) => return Err(self.save_failed(now, format!("Could not check the edit lock: {e}"))),
@@ -371,6 +458,7 @@ impl Session {
                 return Ok(());
             }
         }
+        self.stop_heartbeat();
         let _ = lock::release(&self.dir.lock_path(), &self.me);
         self.mode = Mode::Viewing { holder: None };
         Ok(())
@@ -391,6 +479,7 @@ impl Session {
             }
         }
         if self.is_editing() {
+            self.stop_heartbeat();
             let _ = lock::release(&self.dir.lock_path(), &self.me);
             self.mode = Mode::Viewing { holder: None };
         }
@@ -402,8 +491,30 @@ impl Session {
         self.rescue_dir = dir;
     }
 
+    #[cfg(test)]
+    fn heartbeat_lost(&self) -> bool {
+        self.heartbeat.as_ref().is_some_and(HeartbeatThread::lost)
+    }
+
+    /// Stops the heartbeat thread (waiting out a beat in progress). Called
+    /// before the lock is released, and when it is lost.
+    fn stop_heartbeat(&mut self) {
+        self.heartbeat = None;
+    }
+
+    /// Holds off the heartbeat thread while the session reads the lock file.
+    fn lock_io(&self) -> Option<Arc<HeartbeatShared>> {
+        self.heartbeat.as_ref().map(|h| Arc::clone(&h.shared))
+    }
+
     fn tick_editing(&mut self, now: Ts, inst: Instant) {
-        if inst.saturating_duration_since(self.last_heartbeat) >= HEARTBEAT_EVERY {
+        if let Some(hb) = &self.heartbeat {
+            // The thread is the only heartbeat; it reports a lost lock here.
+            if hb.lost() {
+                self.lose_lock(now);
+                return;
+            }
+        } else if inst.saturating_duration_since(self.last_heartbeat) >= HEARTBEAT_EVERY {
             // An I/O error is retried at the next interval; a lock taken over
             // meanwhile is caught by the owner check before every save.
             self.last_heartbeat = inst;
@@ -532,6 +643,9 @@ impl Session {
 
     fn enter_editing(&mut self, inst: Instant) {
         debug_assert!(!self.unrescued, "unrescued edits must be exported first");
+        // If the thread cannot start, `tick` beats instead.
+        self.heartbeat =
+            self.heartbeat_every.and_then(|every| HeartbeatThread::spawn(self.dir.lock_path(), self.me.clone(), every));
         self.mode = Mode::Editing;
         self.last_activity = inst;
         self.last_heartbeat = inst;
@@ -579,6 +693,7 @@ impl Session {
     /// Someone else owns the lock (save-time owner check or heartbeat): switch
     /// to Viewing; unsaved edits go to the conflicts folder. Returns the message.
     fn lose_lock(&mut self, now: Ts) -> String {
+        self.stop_heartbeat();
         self.mode = Mode::Viewing { holder: self.lock_holder(now).flatten() };
         self.available_announced = false;
         let msg = if self.dirty {
@@ -631,6 +746,7 @@ impl Session {
                 return if self.is_editing() || self.unrescued { Err(io::Error::other(msg)) } else { Ok(()) };
             }
         }
+        self.stop_heartbeat();
         let released = lock::release(&self.dir.lock_path(), &self.me);
         self.mode = Mode::Viewing { holder: None };
         self.available_announced = true;
@@ -865,10 +981,28 @@ mod tests {
         assert_eq!(read_lock(&dir.lock_path()).unwrap().unwrap(), thief);
     }
 
+    /// Opens with the heartbeat thread beating every `every`, or with the
+    /// in-tick fallback heartbeat when `None`.
+    fn open_hb(dir: &DataDir, user: &str, pid: u32, clock: &Clock, every: Option<Duration>) -> Session {
+        Session::open_with(dir.clone(), user, "PC1", pid, t0(), clock.at(0), every, || {}).unwrap()
+    }
+
+    /// Polls `f` for up to 5 s.
+    fn wait_until(mut f: impl FnMut() -> bool) -> bool {
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        f()
+    }
+
     #[test]
     fn heartbeat_lost_leaves_edit_mode() {
         let (_t, dir, clock) = setup();
-        let mut s = open(&dir, "jtan", 1, &clock);
+        let mut s = open_hb(&dir, "jtan", 1, &clock, None);
         let thief = other("agnes", "PC2", 9, t0());
         write_lock(&dir, &thief);
         let ev = s.tick(at(30), clock.at(30));
@@ -880,11 +1014,67 @@ mod tests {
     #[test]
     fn heartbeat_refreshes_lock() {
         let (_t, dir, clock) = setup();
-        let mut s = open(&dir, "jtan", 1, &clock);
+        let mut s = open_hb(&dir, "jtan", 1, &clock, None);
         s.tick(at(29), clock.at(29));
         assert_eq!(read_lock(&dir.lock_path()).unwrap().unwrap().heartbeat_at, t0());
         s.tick(at(30), clock.at(30));
         assert_eq!(read_lock(&dir.lock_path()).unwrap().unwrap().heartbeat_at, at(30));
+    }
+
+    #[test]
+    fn heartbeat_thread_keeps_lock_fresh_without_ticks() {
+        let (_t, dir, clock) = setup();
+        let s = open_hb(&dir, "jtan", 1, &clock, Some(Duration::from_millis(30)));
+        assert!(s.is_editing());
+        // No tick at all (window minimised, or a blocking file dialog open).
+        assert!(wait_until(|| read_lock(&dir.lock_path()).unwrap().unwrap().heartbeat_at != t0()), "heartbeat never refreshed");
+        let first = read_lock(&dir.lock_path()).unwrap().unwrap().heartbeat_at;
+        assert!(wait_until(|| read_lock(&dir.lock_path()).unwrap().unwrap().heartbeat_at > first), "heartbeat refreshed only once");
+        assert!(s.is_editing());
+    }
+
+    #[test]
+    fn heartbeat_thread_is_the_only_heartbeat() {
+        let (_t, dir, clock) = setup();
+        let mut s = open_hb(&dir, "jtan", 1, &clock, Some(Duration::from_secs(3600)));
+        s.tick(at(30), clock.at(30));
+        assert_eq!(read_lock(&dir.lock_path()).unwrap().unwrap().heartbeat_at, t0(), "tick does not beat while the thread runs");
+    }
+
+    #[test]
+    fn heartbeat_thread_lost_lock_triggers_conflict_path() {
+        let (_t, dir, clock) = setup();
+        let mut s = open_hb(&dir, "jtan", 1, &clock, Some(Duration::from_millis(30)));
+        s.save_now(t0()).unwrap();
+        change(&mut s, t0());
+        let thief = other("agnes", "PC2", 9, t0());
+        write_lock(&dir, &thief);
+        assert!(wait_until(|| s.heartbeat_lost()), "thread never noticed the takeover");
+        // The very next tick (well before any save is due) runs the lock-lost path.
+        let ev = s.tick(at(1), clock.at(1));
+        assert!(ev.contains(&SessionEvent::LeftEditMode(LeaveReason::Conflict)), "{ev:?}");
+        let path = conflict_path(&ev).expect("unsaved edits exported");
+        let exported: Data = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(exported.settings.due_soon_days, 45);
+        assert!(!s.is_editing());
+        assert_eq!(read_lock(&dir.lock_path()).unwrap().unwrap(), thief, "thief's lock untouched");
+    }
+
+    #[test]
+    fn heartbeat_thread_stops_on_release() {
+        let (_t, dir, clock) = setup();
+        let mut s = open_hb(&dir, "jtan", 1, &clock, Some(Duration::from_millis(10)));
+        s.stop_editing(at(1)).unwrap();
+        assert!(!dir.lock_path().exists());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!dir.lock_path().exists(), "a late heartbeat recreated the lock");
+        // Editing again starts a fresh thread.
+        assert_eq!(s.start_editing(at(2), clock.at(2)).unwrap(), Acquire::Acquired);
+        assert!(wait_until(|| read_lock(&dir.lock_path()).unwrap().unwrap().heartbeat_at != at(2)));
+        drop(s);
+        let before = fs::read(dir.lock_path()).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(fs::read(dir.lock_path()).unwrap(), before, "thread kept beating after drop");
     }
 
     #[test]
@@ -1167,7 +1357,7 @@ mod tests {
     #[test]
     fn lock_lost_with_unsaved_edits_and_failed_export_keeps_them() {
         let (_t, dir, clock) = setup();
-        let mut s = open(&dir, "jtan", 1, &clock);
+        let mut s = open_hb(&dir, "jtan", 1, &clock, None);
         s.save_now(t0()).unwrap();
         write_lock(&dir, &other("agnes", "PC2", 9, t0()));
         block_dir(&dir.conflicts());
@@ -1201,7 +1391,7 @@ mod tests {
         dir.ensure().unwrap();
         save_snapshot(&dir, &Data::new_empty("agnes", t0() - chrono::Duration::days(1)), "old.json").unwrap();
         let d2 = dir.clone();
-        let s = Session::open_with(dir.clone(), "jtan", "PC1", 1, t0(), clock.at(0), move || {
+        let s = Session::open_with(dir.clone(), "jtan", "PC1", 1, t0(), clock.at(0), Some(HEARTBEAT_EVERY), move || {
             // A peer saves between our load and our lock attempt.
             let mut newer = Data::new_empty("agnes", t0() - chrono::Duration::hours(1));
             newer.settings.due_soon_days = 99;
@@ -1218,7 +1408,7 @@ mod tests {
         dir.ensure().unwrap();
         let blocker = dir.snapshots().join("x.json");
         let b2 = blocker.clone();
-        let s = Session::open_with(dir.clone(), "jtan", "PC1", 1, t0(), clock.at(0), move || {
+        let s = Session::open_with(dir.clone(), "jtan", "PC1", 1, t0(), clock.at(0), Some(HEARTBEAT_EVERY), move || {
             fs::create_dir(&b2).unwrap();
         })
         .unwrap();

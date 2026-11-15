@@ -28,6 +28,8 @@ use crate::ui::summary::{self, SummaryState};
 use crate::ui::theme::{self, serif, Palette};
 use crate::ui::widgets::{icon_button, nav_item, search_box};
 
+const RELOAD_TOAST_EVERY: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Summary,
@@ -86,6 +88,8 @@ pub struct TrackerApp {
     open_detail: Option<(Id, Id)>,
     /// The close was cleared (saved, or the user chose to quit anyway).
     allow_close: bool,
+    /// When "Updated with the latest changes" was last shown.
+    last_reload_toast: Option<Instant>,
     summary: SummaryState,
     sections: SectionsState,
     personnel: PersonnelState,
@@ -119,6 +123,7 @@ impl TrackerApp {
             search: String::new(),
             open_detail: None,
             allow_close: false,
+            last_reload_toast: None,
             summary: SummaryState::default(),
             sections: SectionsState::default(),
             personnel: PersonnelState::default(),
@@ -138,8 +143,29 @@ impl TrackerApp {
         self.styled = true;
     }
 
-    /// Draws one frame into the root `ui` (used by eframe and by tests).
+    /// One full frame, logic then drawing, as eframe runs it when the window
+    /// is visible (used by tests).
     pub fn show_root(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.logic_pass(&ctx);
+        self.draw(ui);
+    }
+
+    /// Ticks the session (once per frame) and handles a close request. eframe
+    /// runs this before every ui pass and also, without one, while the window
+    /// is minimised or hidden; the repaint request keeps it running then.
+    /// Paints nothing: events only queue toasts and modals for the next pass.
+    fn logic_pass(&mut self, ctx: &egui::Context) {
+        let (now, inst) = (now_ts(), Instant::now());
+        for ev in self.session.tick(now, inst) {
+            self.on_event(ev, inst);
+        }
+        self.handle_close(ctx, now, inst);
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+
+    /// Draws one frame into the root `ui`.
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !self.styled {
             // New fonts only take effect from the next pass: draw nothing yet.
@@ -148,6 +174,8 @@ impl TrackerApp {
             return;
         }
         let (now, inst) = (now_ts(), Instant::now());
+        // Input events are only fresh in a ui pass (a logic-only pass while
+        // hidden sees the last shown frame's), so activity is noted here.
         if ctx.input(|i| !i.events.is_empty()) {
             self.session.note_activity(inst);
             // Activity ends any countdown at once, so it never goes stale.
@@ -156,10 +184,6 @@ impl TrackerApp {
                 self.modal = None;
             }
         }
-        for ev in self.session.tick(now, inst) {
-            self.on_event(ev, inst);
-        }
-        self.handle_close(&ctx, now, inst);
         self.toasts.retain(|t| t.until > inst);
         let focus_search = self.modal.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K));
         if focus_search && self.prefs.sidebar_collapsed {
@@ -221,7 +245,6 @@ impl TrackerApp {
         }
         self.show_modal(&ctx, now, inst);
         overlays::show_toasts(&ctx, &pal, &self.toasts);
-        ctx.request_repaint_after(Duration::from_secs(1));
     }
 
     fn on_event(&mut self, ev: SessionEvent, inst: Instant) {
@@ -247,7 +270,13 @@ impl TrackerApp {
                 };
                 self.toasts.push(Toast::new(text));
             }
-            SessionEvent::Reloaded => self.toasts.push(Toast::new("Updated with the latest changes")),
+            SessionEvent::Reloaded => {
+                // A busy editor saves every few seconds: say so at most once a minute.
+                if self.last_reload_toast.is_none_or(|t| inst.saturating_duration_since(t) >= RELOAD_TOAST_EVERY) {
+                    self.last_reload_toast = Some(inst);
+                    self.toasts.push(Toast::new("Updated with the latest changes"));
+                }
+            }
             SessionEvent::Conflict(path) => self.toasts.push(Toast::lasting(
                 format!("Your unsaved changes were kept in {}", path.display()),
                 Duration::from_secs(10),
@@ -491,8 +520,13 @@ impl TrackerApp {
 }
 
 impl eframe::App for TrackerApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.logic_pass(ctx);
+    }
+
+    /// `logic` already ran for this frame.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.show_root(ui);
+        self.draw(ui);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -537,5 +571,46 @@ mod tests {
         assert!(h.query_by_label("Still there?").is_none(), "typing ends the countdown");
         assert!(h.state().modal.is_none());
         assert!(h.state().warn_deadline.is_none());
+    }
+
+    fn toast_texts(app: &TrackerApp) -> Vec<&str> {
+        app.toasts.iter().map(|t| t.text.as_str()).collect()
+    }
+
+    #[test]
+    fn logic_ticks_the_session_without_a_ui_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+        data_dir.ensure().unwrap();
+        // A stale lock: opening takes it over and queues `TookOverStale` for the next tick.
+        let old = now_ts() - chrono::Duration::minutes(10);
+        let prev = crate::lock::LockInfo { user: "agnes".into(), machine: "PC2".into(), pid: 9, acquired_at: old, heartbeat_at: old };
+        std::fs::write(data_dir.lock_path(), serde_json::to_vec(&prev).unwrap()).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(data_dir.lock_path()).unwrap();
+        f.set_modified(std::time::SystemTime::now() - Duration::from_secs(600)).unwrap();
+        drop(f);
+        let session = Session::open(data_dir, "tester", "pc", 1, now_ts(), Instant::now()).unwrap();
+        assert!(session.is_editing());
+        let mut app = TrackerApp::new_for_test(session);
+        // What eframe calls while the window is minimised: logic only, no ui pass.
+        let ctx = egui::Context::default();
+        eframe::App::logic(&mut app, &ctx, &mut eframe::Frame::_new_kittest());
+        assert!(toast_texts(&app).iter().any(|t| t.starts_with("Took over editing from agnes")), "{:?}", toast_texts(&app));
+    }
+
+    #[test]
+    fn reload_toast_at_most_once_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = DataDir { root: dir.path().join("CompetencyData") };
+        let session = Session::open(data_dir, "tester", "pc", 1, now_ts(), Instant::now()).unwrap();
+        let mut app = TrackerApp::new_for_test(session);
+        let t = Instant::now();
+        let count = |app: &TrackerApp| toast_texts(app).iter().filter(|s| **s == "Updated with the latest changes").count();
+        app.on_event(SessionEvent::Reloaded, t);
+        app.on_event(SessionEvent::Reloaded, t + Duration::from_secs(10));
+        app.on_event(SessionEvent::Reloaded, t + Duration::from_secs(59));
+        assert_eq!(count(&app), 1);
+        app.on_event(SessionEvent::Reloaded, t + Duration::from_secs(60));
+        assert_eq!(count(&app), 2);
     }
 }

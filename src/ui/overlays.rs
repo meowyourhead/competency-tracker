@@ -12,7 +12,7 @@ use crate::ui::theme::{serif, Palette};
 
 /// A short confirmation shown bottom-centre.
 pub struct Toast {
-    text: String,
+    pub(crate) text: String,
     pub(crate) until: Instant,
 }
 
