@@ -349,6 +349,20 @@ mod tests {
         assert_eq!(parse_latest(&json("v1.0", ASSET), "1.1.0").unwrap(), None);
     }
 
+    /// Talks to GitHub: `cargo test -- --ignored live_channel`.
+    #[test]
+    #[ignore]
+    fn live_channel_offers_the_latest_release_to_older_builds() {
+        assert_eq!(fetch_latest(), Ok(None), "this build is the latest");
+        let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+        let tmp = temp_file("live.json");
+        download(&url, &tmp).unwrap();
+        let json = std::fs::read_to_string(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        let r = parse_latest(&json, "0.0.1").unwrap().expect("offered");
+        assert!(r.download_url.ends_with(ASSET), "{}", r.download_url);
+    }
+
     #[test]
     fn newer_release_without_the_program_is_an_error() {
         assert!(parse_latest(&json("v1.2", "other.zip"), "1.1.0").is_err());
