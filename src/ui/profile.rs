@@ -17,7 +17,7 @@ use crate::ui::app::Ctx;
 use crate::ui::theme::{heading, medium, Palette};
 use crate::ui::widgets::{
     due_pill, due_pill_text, empty_state, paint_section_chip, rgb, section_chip,
-    section_chip_width, section_dot, segmented, status_colors,
+    section_chip_width, segmented, status_colors,
 };
 
 /// What the profile keeps between frames.
@@ -559,16 +559,7 @@ fn card(ui: &mut egui::Ui, pal: &Palette, g: &[&ProfileRow]) -> Option<Id> {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                section_dot(ui, first.color);
-                ui.label(
-                    RichText::new(&first.section_name)
-                        .family(medium())
-                        .size(14.0)
-                        .color(pal.text),
-                );
-            });
+            section_chip(ui, pal, &first.section_name, first.color);
             ui.add_space(4.0);
             for (k, r) in g.iter().enumerate() {
                 if k > 0 {

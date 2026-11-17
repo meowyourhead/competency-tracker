@@ -11,6 +11,7 @@ use crate::snapshot::archive_old;
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::Palette;
 use crate::ui::widgets::segmented;
+use crate::update::{self, UpdateState};
 
 /// Defaults when an optional setting is switched on.
 const INITIAL_DUE_DEFAULT: i64 = 30;
@@ -63,6 +64,93 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut GeneralTab) {
     }
     archive(ui, cx, &saved);
     data_folder(ui, cx);
+    updates(ui, cx);
+}
+
+/// The update channel: this version, the latest on GitHub, and the buttons
+/// to check, install and restart. Needs no edit mode: it changes only the
+/// program file, never the data.
+fn updates(ui: &mut egui::Ui, cx: &mut Ctx) {
+    let pal = cx.pal;
+    let state = cx.updater.state();
+    let busy = cx.updater.busy();
+    if busy {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    let mut check = false;
+    let mut install = None;
+    let mut restart = false;
+    let mut open_page = None;
+    card(ui, pal, "Updates", |ui| {
+        ui.label(format!("You're running version {}.", update::CURRENT));
+        let (text, colour) = match &state {
+            UpdateState::Idle => ("Not checked yet.".to_owned(), pal.muted),
+            UpdateState::Checking => (
+                "Checking GitHub for a newer version\u{2026}".to_owned(),
+                pal.muted,
+            ),
+            UpdateState::UpToDate => ("This is the latest version.".to_owned(), pal.muted),
+            UpdateState::Available(r) => (format!("Version {} is available.", r.tag), pal.text),
+            UpdateState::Installing(r) => {
+                (format!("Downloading version {}\u{2026}", r.tag), pal.muted)
+            }
+            UpdateState::Installed(r) => (
+                format!("Version {} is installed. Restart to start using it.", r.tag),
+                pal.text,
+            ),
+            UpdateState::Failed(e) => (format!("Update failed: {e}"), pal.muted),
+        };
+        ui.label(RichText::new(text).color(colour));
+        if let UpdateState::Available(r) = &state {
+            if !r.notes.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(&r.notes).color(pal.muted));
+            }
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| match &state {
+            UpdateState::Available(r) => {
+                if ui.button("Download and install").clicked() {
+                    install = Some(r.clone());
+                }
+                if ui.button("Release page").clicked() {
+                    open_page = Some(r.page_url.clone());
+                }
+            }
+            UpdateState::Installed(_) => {
+                restart = ui
+                    .button("Restart now")
+                    .on_hover_text("Saves, closes and opens the new version.")
+                    .clicked();
+            }
+            _ => {
+                check = ui
+                    .add_enabled(!busy, Button::new("Check for updates"))
+                    .clicked();
+            }
+        });
+        ui.label(
+            RichText::new(
+                "New versions are published on GitHub. The app checks once each time it starts.",
+            )
+            .color(pal.muted),
+        );
+    });
+    let ctx = ui.ctx().clone();
+    if check {
+        cx.updater.check(Some(ctx.clone()));
+    }
+    if let Some(r) = install {
+        cx.updater.install(r, Some(ctx.clone()));
+    }
+    if restart {
+        cx.updater.restart_requested = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+    if let Some(url) = open_page {
+        ctx.open_url(egui::OpenUrl::new_tab(url));
+    }
 }
 
 /// The display scale: this computer's own choice, so it needs no edit mode

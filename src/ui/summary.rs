@@ -22,7 +22,8 @@ use crate::session::Session;
 use crate::ui::app::Ctx;
 use crate::ui::theme::{medium, serif, Palette};
 use crate::ui::widgets::{
-    chip_select, due_pill, empty_state, search_box, section_color, segmented, SEARCH_W,
+    chip_select, due_pill, empty_state, paint_section_chip, search_box, section_chip_row,
+    section_chip_width, section_color, segmented, SEARCH_W,
 };
 
 /// Where an assessment stands. Every assessment is exactly one of these.
@@ -543,12 +544,7 @@ fn sections_card(
             }
             let name_w = sections
                 .iter()
-                .map(|s| {
-                    ui.painter()
-                        .layout_no_wrap(s.name.clone(), FontId::new(14.0, medium()), pal.text)
-                        .size()
-                        .x
-                })
+                .map(|s| section_chip_width(ui, &s.name))
                 .fold(0.0, f32::max)
                 .min(ui.available_width() * 0.4);
             for s in sections {
@@ -581,9 +577,6 @@ fn sections_card(
     }
 }
 
-/// Room for the colour dot before a section's name.
-const DOT_W: f32 = 16.0;
-
 #[allow(clippy::too_many_arguments)]
 fn section_row(
     ui: &mut egui::Ui,
@@ -609,15 +602,11 @@ fn section_row(
             p.rect_filled(rect.expand2(Vec2::new(8.0, 0.0)), 8, pal.sidebar);
         }
         let mid = rect.center().y;
-        // The section's colour as a dot before its name.
-        p.circle_filled(egui::pos2(rect.left() + 4.0, mid), 4.0, color);
-        let name_g = p.layout_no_wrap(name.to_owned(), FontId::new(14.0, medium()), pal.text);
-        p.with_clip_rect(Rect::from_min_size(rect.min, Vec2::new(DOT_W + name_w, h)))
-            .galley(
-                egui::pos2(rect.left() + DOT_W, mid - name_g.size().y / 2.0),
-                name_g,
-                pal.text,
-            );
+        // The section's name in a pill of its colour.
+        let chip_w = section_chip_width(ui, name).min(name_w);
+        let chip =
+            Rect::from_min_size(egui::pos2(rect.left(), mid - 10.0), Vec2::new(chip_w, 20.0));
+        paint_section_chip(ui, pal, chip, name, color);
         let overdue = counts[2];
         let tail_w = 150.0;
         let pct_g = p.layout_no_wrap(format!("{pct}%"), FontId::new(14.0, medium()), pal.text);
@@ -628,7 +617,7 @@ fn section_row(
         };
         let note_g = p.layout_no_wrap(note, FontId::proportional(12.5), pal.red_fg);
         let bar = Rect::from_min_max(
-            egui::pos2(rect.left() + DOT_W + name_w + 16.0, mid - 5.0),
+            egui::pos2(rect.left() + name_w + 16.0, mid - 5.0),
             egui::pos2(rect.right() - tail_w, mid + 5.0),
         );
         stacked_bar(p, pal, bar, counts);
@@ -1023,31 +1012,16 @@ fn register(
                         if resp.clicked() {
                             picked = Some(Pick::Profile(p.id.clone()));
                         }
-                        if !p.title.is_empty() {
-                            ui.add_space(2.0);
-                            ui.add(
-                                Label::new(RichText::new(p.title).size(12.5).color(pal.muted))
-                                    .truncate(),
-                            );
-                        }
                     });
                     cell(ui, sec_w, &mut |ui| {
                         ui.add_space(12.0);
-                        // Each name after a dot in its section's colour.
-                        let mut job = egui::text::LayoutJob::default();
-                        let font = egui::TextStyle::Body.resolve(ui.style());
-                        let fmt = |color| egui::TextFormat::simple(font.clone(), color);
-                        for (k, (name, id)) in p.sections.iter().enumerate() {
-                            if k > 0 {
-                                job.append("   ", 0.0, fmt(pal.muted));
-                            }
-                            let dot = section_color(data, id).unwrap_or(pal.muted);
-                            job.append("\u{25cf} ", 0.0, fmt(dot));
-                            job.append(name, 0.0, fmt(pal.muted));
-                        }
-                        let names: Vec<&str> = p.sections.iter().map(|(n, _)| *n).collect();
-                        ui.add(Label::new(job).truncate())
-                            .on_hover_text(names.join("\n"));
+                        // Each section as a pill in its colour.
+                        let secs: Vec<(&str, Color32)> = p
+                            .sections
+                            .iter()
+                            .map(|(name, id)| (*name, section_color(data, id).unwrap_or(pal.muted)))
+                            .collect();
+                        section_chip_row(ui, pal, &secs, (sec_w - 24.0).max(0.0));
                     });
                     for (n, warn) in [
                         (p.current, None),

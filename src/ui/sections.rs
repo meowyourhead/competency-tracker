@@ -29,7 +29,7 @@ use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{medium, Palette};
 use crate::ui::widgets::{
     chip_select, due_pill_text, empty_state, rgb, search_box, segmented, status_colors,
-    status_label, SEARCH_W,
+    status_label, SEARCH_W, SECTION_TINT,
 };
 
 /// The frozen name column.
@@ -901,15 +901,20 @@ fn draw_grid(
         let galley =
             ui.painter()
                 .layout_no_wrap(g.name.clone(), FontId::new(12.5, medium()), pal.text);
-        let dot_w = 13.0;
-        let need = dot_w + galley.size().x;
-        let left = (rect.left().max(header.left()) + 10.0).min(rect.right() - need - 10.0);
-        let left = left.max(rect.left() + 10.0);
+        // The name in a pill of the section's colour.
+        let pad = 9.0;
+        let need = galley.size().x + 2.0 * pad;
+        let left = (rect.left().max(header.left()) + 8.0).min(rect.right() - need - 8.0);
+        let left = left.max(rect.left() + 8.0);
         let mid = rect.top() + 3.0 + (band - 3.0) / 2.0;
         let clip = hp.with_clip_rect(rect.intersect(header));
-        clip.circle_filled(egui::pos2(left + 3.5, mid), 3.5, g.color);
+        clip.rect_filled(
+            Rect::from_min_size(egui::pos2(left, mid - 9.5), Vec2::new(need, 19.0)),
+            255,
+            g.color.gamma_multiply(SECTION_TINT),
+        );
         clip.galley(
-            egui::pos2(left + dot_w, mid - galley.size().y / 2.0),
+            egui::pos2(left + pad, mid - galley.size().y / 2.0),
             galley,
             pal.text,
         );

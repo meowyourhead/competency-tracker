@@ -10,4 +10,6 @@ pub mod query;
 pub mod schedule;
 pub mod session;
 pub mod snapshot;
+pub mod startup;
 pub mod ui;
+pub mod update;

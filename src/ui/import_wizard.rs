@@ -454,6 +454,7 @@ mod tests {
                         display_scale: &mut 1.0,
                         profile_view: &mut Default::default(),
                         open_profile: &mut None,
+                        updater: &mut Default::default(),
                     };
                     if show(ui, &mut cx, &mut st.wizard) {
                         st.review = true;

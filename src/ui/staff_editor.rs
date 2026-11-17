@@ -11,8 +11,8 @@ use egui::{Button, Frame, Margin, Modal, RichText, ScrollArea, TextEdit};
 use crate::model::{AssignState, Data, Id, Staff};
 use crate::ops::{self, OpError};
 use crate::ui::app::{Ctx, Toast};
-use crate::ui::theme::{medium, serif};
-use crate::ui::widgets::{date_picker, section_color, section_dot};
+use crate::ui::theme::{medium, serif, Palette};
+use crate::ui::widgets::{date_picker, section_chip, section_color};
 
 /// A dialog in progress. `id` is `None` when adding a person.
 pub(crate) struct StaffForm {
@@ -85,7 +85,7 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Ctx, form: &mut StaffForm) -> b
             ScrollArea::vertical()
                 .max_height(300.0)
                 .auto_shrink([false, true])
-                .show(ui, |ui| assignments(ui, data, form));
+                .show(ui, |ui| assignments(ui, cx.pal, data, form));
             if let Some(e) = &form.error {
                 ui.colored_label(cx.pal.red_fg, e);
             }
@@ -114,23 +114,35 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Ctx, form: &mut StaffForm) -> b
 }
 
 fn fields(ui: &mut egui::Ui, form: &mut StaffForm, today: NaiveDate) {
-    ui.label("Name");
-    let name = ui.add(
-        TextEdit::singleline(&mut form.name)
-            .hint_text("Full name")
-            .desired_width(f32::INFINITY),
-    );
-    if form.fresh {
-        name.request_focus();
-        form.fresh = false;
-    }
-    ui.add_space(4.0);
-    ui.label("Title");
-    ui.add(
-        TextEdit::singleline(&mut form.title)
-            .hint_text("e.g. Senior MLT")
-            .desired_width(f32::INFINITY),
-    );
+    // Name and title share a row; the name gets the larger part.
+    let gap = 12.0;
+    let name_w = ((ui.available_width() - gap) * 0.6).floor();
+    let title_w = ui.available_width() - gap - name_w;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.vertical(|ui| {
+            ui.set_width(name_w);
+            ui.label("Name");
+            let name = ui.add(
+                TextEdit::singleline(&mut form.name)
+                    .hint_text("Full name")
+                    .desired_width(f32::INFINITY),
+            );
+            if form.fresh {
+                name.request_focus();
+                form.fresh = false;
+            }
+        });
+        ui.vertical(|ui| {
+            ui.set_width(title_w);
+            ui.label("Title");
+            ui.add(
+                TextEdit::singleline(&mut form.title)
+                    .hint_text("e.g. Senior MLT")
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Joined");
@@ -152,7 +164,7 @@ fn fields(ui: &mut egui::Ui, form: &mut StaffForm, today: NaiveDate) {
 
 /// One collapsible group per section: the whole-section checkbox in the
 /// header, a 3-way selector per test inside.
-fn assignments(ui: &mut egui::Ui, data: &Data, form: &mut StaffForm) {
+fn assignments(ui: &mut egui::Ui, pal: &Palette, data: &Data, form: &mut StaffForm) {
     for sec in data.sections_sorted().into_iter().filter(|s| !s.retired) {
         let mut tests: Vec<_> = sec.tests.iter().filter(|t| !t.retired).collect();
         if tests.is_empty() {
@@ -162,10 +174,8 @@ fn assignments(ui: &mut egui::Ui, data: &Data, form: &mut StaffForm) {
         let id = ui.make_persistent_id(("staff_editor_section", &sec.id));
         CollapsingState::load_with_default_open(ui.ctx(), id, false)
             .show_header(ui, |ui| {
-                if let Some(c) = section_color(data, &sec.id) {
-                    section_dot(ui, c);
-                }
-                ui.label(RichText::new(&sec.name).family(medium()));
+                let color = section_color(data, &sec.id).unwrap_or(pal.muted);
+                section_chip(ui, pal, &sec.name, color);
                 let mut whole = tests
                     .iter()
                     .all(|t| form.assign.get(&t.id) == Some(&AssignState::Assigned));

@@ -95,9 +95,12 @@ pub fn section_color(data: &Data, section_id: &str) -> Option<Color32> {
 
 /// Size of a section chip's text.
 pub const SECTION_CHIP_SIZE: f32 = 11.5;
-const SECTION_DOT_R: f32 = 3.0;
+/// Space between a section chip's edge and its text.
+const SECTION_CHIP_PAD: f32 = 10.0;
+/// How strongly a section's colour tints its chip.
+pub const SECTION_TINT: f32 = 0.24;
 
-/// Width of a section chip for `name` (dot, gap, text, padding).
+/// Width of a section chip for `name` (text and padding).
 pub fn section_chip_width(ui: &Ui, name: &str) -> f32 {
     let text = ui
         .painter()
@@ -108,25 +111,64 @@ pub fn section_chip_width(ui: &Ui, name: &str) -> f32 {
         )
         .size()
         .x;
-    text + 2.0 * SECTION_DOT_R + 5.0 + 16.0
+    text + 2.0 * SECTION_CHIP_PAD
 }
 
-/// Paints a section chip (soft tint, dot, name) into `rect`.
+/// Paints a section chip (a pill tinted in the section's colour, holding its
+/// name) into `rect`. A name too long for `rect` is cut off at its edge.
 pub fn paint_section_chip(ui: &Ui, pal: &Palette, rect: Rect, name: &str, color: Color32) {
     if !ui.is_rect_visible(rect) {
         return;
     }
     let p = ui.painter();
-    p.rect_filled(rect, PILL, color.gamma_multiply(0.14));
-    let dot = egui::pos2(rect.left() + 8.0 + SECTION_DOT_R, rect.center().y);
-    p.circle_filled(dot, SECTION_DOT_R, color);
-    p.text(
-        egui::pos2(dot.x + SECTION_DOT_R + 5.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        name,
-        FontId::proportional(SECTION_CHIP_SIZE),
-        pal.text,
-    );
+    p.rect_filled(rect, PILL, color.gamma_multiply(SECTION_TINT));
+    p.with_clip_rect(rect.shrink2(Vec2::new(SECTION_CHIP_PAD - 2.0, 0.0)))
+        .text(
+            egui::pos2(rect.left() + SECTION_CHIP_PAD, rect.center().y),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::proportional(SECTION_CHIP_SIZE),
+            pal.text,
+        );
+}
+
+/// Section chips on one line, `width` wide. Those that don't fit are
+/// counted in a "+N" at the end; the tooltip names every section.
+pub fn section_chip_row(
+    ui: &mut Ui,
+    pal: &Palette,
+    secs: &[(&str, Color32)],
+    width: f32,
+) -> egui::Response {
+    const H: f32 = 20.0;
+    const GAP: f32 = 6.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, H), Sense::hover());
+    let more_w = 30.0;
+    let mut x = rect.left();
+    for (k, (name, color)) in secs.iter().enumerate() {
+        let w = section_chip_width(ui, name);
+        let last = k + 1 == secs.len();
+        // Keep room for the "+N" unless this is the last chip.
+        let limit = rect.right() - if last { 0.0 } else { more_w };
+        if x + w > limit && k > 0 {
+            ui.painter().text(
+                egui::pos2(x, rect.center().y),
+                Align2::LEFT_CENTER,
+                format!("+{}", secs.len() - k),
+                FontId::proportional(SECTION_CHIP_SIZE + 0.5),
+                pal.muted,
+            );
+            break;
+        }
+        let w = w.min(rect.right() - x);
+        let chip = Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(w, H));
+        paint_section_chip(ui, pal, chip, name, *color);
+        x += w + GAP;
+    }
+    let names: Vec<&str> = secs.iter().map(|(n, _)| *n).collect();
+    let label = names.join(", ");
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &label));
+    resp.on_hover_text(names.join("\n"))
 }
 
 /// A section's name as a chip in its colour.
@@ -137,14 +179,6 @@ pub fn section_chip(ui: &mut Ui, pal: &Palette, name: &str, color: Color32) -> e
     paint_section_chip(ui, pal, rect, name, color);
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, name));
     resp
-}
-
-/// A small filled dot in a section's colour, inline.
-pub fn section_dot(ui: &mut Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-    if ui.is_rect_visible(rect) {
-        ui.painter().circle_filled(rect.center(), 3.5, color);
-    }
 }
 
 /// A clickable summary card: big serif number over a muted label.
@@ -231,25 +265,347 @@ pub fn chip_select<T: PartialEq + Clone>(
     changed
 }
 
-/// egui_extras' date picker (which works on `jiff` dates) for a chrono date.
-pub fn date_picker(ui: &mut Ui, date: &mut chrono::NaiveDate, salt: &str) {
-    use chrono::Datelike;
-    let Ok(mut d) =
-        jiff::civil::Date::new(date.year() as i16, date.month() as i8, date.day() as i8)
-    else {
-        return;
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const WEEKDAYS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+/// One day in the picker's calendar; seven make its width.
+const DAY_CELL: f32 = 36.0;
+
+/// Which part of the date the picker's body is choosing.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum PickView {
+    #[default]
+    Day,
+    Month,
+    Year,
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (y, m) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
     };
-    ui.add(
-        egui_extras::DatePickerButton::new(&mut d)
-            .id_salt(salt)
-            .format("%-d %b %Y")
-            .calendar_week(false),
-    );
-    if let Some(back) =
-        chrono::NaiveDate::from_ymd_opt(d.year().into(), d.month() as u32, d.day() as u32)
-    {
-        *date = back;
+    chrono::NaiveDate::from_ymd_opt(y, m, 1)
+        .and_then(|d| d.pred_opt())
+        .map_or(28, |d| chrono::Datelike::day(&d))
+}
+
+/// `d` moved to `year` / `month`, its day pulled back when the month is shorter.
+fn with_month(d: chrono::NaiveDate, year: i32, month: u32) -> chrono::NaiveDate {
+    use chrono::Datelike;
+    let day = d.day().min(days_in_month(year, month));
+    chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap_or(d)
+}
+
+/// `d` moved by `months` (negative goes back).
+fn shift_months(d: chrono::NaiveDate, months: i32) -> chrono::NaiveDate {
+    use chrono::Datelike;
+    let n = d.year() * 12 + d.month0() as i32 + months;
+    with_month(d, n.div_euclid(12), n.rem_euclid(12) as u32 + 1)
+}
+
+/// A date field: a button showing the date ("15 Nov 2026") that opens a
+/// picker. The picker's heading reads day, month, year; each part is a tab
+/// for choosing it (a calendar of days, the twelve months, a page of years).
+pub fn date_picker(ui: &mut Ui, date: &mut chrono::NaiveDate, salt: &str) {
+    let text = format!("{}  {}", icon::CALENDAR_BLANK, fmt_date(*date));
+    let resp = ui
+        .push_id(("date_picker", salt), |ui| ui.button(text))
+        .inner;
+    let popup_id = Popup::default_response_id(&resp);
+    if resp.clicked() {
+        // Every opening starts on the calendar, at the date's own years.
+        ui.data_mut(|d| {
+            d.remove_temp::<PickView>(popup_id);
+            d.remove_temp::<i32>(popup_id);
+        });
     }
+    let frame = egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(14));
+    Popup::from_toggle_button_response(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .frame(frame)
+        .gap(6.0)
+        .show(|ui| date_picker_body(ui, date, popup_id));
+}
+
+fn date_picker_body(ui: &mut Ui, date: &mut chrono::NaiveDate, popup_id: egui::Id) {
+    use chrono::Datelike;
+    let width = 7.0 * DAY_CELL;
+    ui.set_width(width);
+    ui.spacing_mut().item_spacing = Vec2::ZERO;
+    let accent = ui.visuals().hyperlink_color;
+    let muted = ui.visuals().weak_text_color();
+    let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let today = crate::dates::now_ts().date_naive();
+    let mut view: PickView = ui.data(|d| d.get_temp(popup_id)).unwrap_or_default();
+    let page_of = |year: i32| year.div_euclid(12) * 12;
+    let mut page: i32 = ui
+        .data(|d| d.get_temp(popup_id))
+        .unwrap_or_else(|| page_of(date.year()));
+
+    // The date as a heading, in the order it's chosen: day, month, year.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 9.0;
+        let parts = [
+            (PickView::Day, date.day().to_string(), "Day"),
+            (
+                PickView::Month,
+                MONTHS[date.month0() as usize].to_owned(),
+                "Month",
+            ),
+            (PickView::Year, date.year().to_string(), "Year"),
+        ];
+        for (v, text, what) in parts {
+            if date_part(ui, &text, what, view == v, accent, muted).clicked() {
+                view = v;
+                page = page_of(date.year());
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let (unit, step) = match view {
+                PickView::Day => ("month", 1),
+                PickView::Month => ("year", 12),
+                PickView::Year => ("years", 0),
+            };
+            let mut go = 0;
+            if step_button(ui, icon::CARET_RIGHT, &format!("Next {unit}")).clicked() {
+                go = 1;
+            }
+            if step_button(ui, icon::CARET_LEFT, &format!("Previous {unit}")).clicked() {
+                go = -1;
+            }
+            if view == PickView::Year {
+                page += 12 * go;
+            } else if go != 0 {
+                *date = shift_months(*date, step * go);
+            }
+        });
+    });
+    ui.add_space(10.0);
+
+    match view {
+        PickView::Day => {
+            ui.horizontal(|ui| {
+                for name in WEEKDAYS {
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(DAY_CELL, 22.0), Sense::hover());
+                    ui.painter().text(
+                        r.center(),
+                        Align2::CENTER_CENTER,
+                        name,
+                        FontId::proportional(11.5),
+                        muted,
+                    );
+                }
+            });
+            let first = date.with_day(1).unwrap_or(*date);
+            let lead = first.weekday().num_days_from_monday();
+            let days = days_in_month(date.year(), date.month());
+            let mut picked = None;
+            for week in 0..(lead + days).div_ceil(7) {
+                ui.horizontal(|ui| {
+                    for slot in week * 7..week * 7 + 7 {
+                        let day = (slot + 1).saturating_sub(lead);
+                        if slot < lead || day > days {
+                            ui.allocate_exact_size(Vec2::splat(DAY_CELL), Sense::hover());
+                            continue;
+                        }
+                        let Some(d) = date.with_day(day) else {
+                            continue;
+                        };
+                        let cell = pick_cell(
+                            ui,
+                            Vec2::splat(DAY_CELL),
+                            &day.to_string(),
+                            &fmt_date(d),
+                            d == *date,
+                            d == today,
+                            true,
+                        );
+                        if cell.clicked() {
+                            picked = Some(d);
+                        }
+                    }
+                });
+            }
+            if let Some(d) = picked {
+                *date = d;
+            }
+        }
+        PickView::Month => {
+            let size = Vec2::new(width / 3.0, 40.0);
+            for row in 0..4 {
+                ui.horizontal(|ui| {
+                    for m in row * 3..row * 3 + 3u32 {
+                        let name = MONTHS[m as usize];
+                        let this = date.year() == today.year() && m == today.month0();
+                        let on = m == date.month0();
+                        if pick_cell(ui, size, &name[..3], name, on, this, false).clicked() {
+                            *date = with_month(*date, date.year(), m + 1);
+                        }
+                    }
+                });
+            }
+        }
+        PickView::Year => {
+            let size = Vec2::new(width / 3.0, 40.0);
+            for row in 0..4 {
+                ui.horizontal(|ui| {
+                    for y in page + row * 3..page + row * 3 + 3 {
+                        let text = y.to_string();
+                        let (on, this) = (y == date.year(), y == today.year());
+                        if pick_cell(ui, size, &text, &text, on, this, false).clicked() {
+                            *date = with_month(*date, y, date.month());
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    ui.add_space(10.0);
+    let y = ui.cursor().top();
+    ui.painter()
+        .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, border));
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        let jump = egui::Button::new(RichText::new("Today").color(accent)).frame(false);
+        if ui.add(jump).on_hover_text(fmt_date(today)).clicked() {
+            *date = today;
+            view = PickView::Day;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Done").clicked() {
+                Popup::close_id(ui.ctx(), popup_id);
+            }
+        });
+    });
+    ui.data_mut(|d| {
+        d.insert_temp(popup_id, view);
+        d.insert_temp(popup_id, page);
+    });
+}
+
+/// One part of the picker's heading (the day, the month or the year). The
+/// part being chosen is in full ink over an accent rule; the others are quiet.
+fn date_part(
+    ui: &mut Ui,
+    text: &str,
+    what: &str,
+    active: bool,
+    accent: Color32,
+    muted: Color32,
+) -> egui::Response {
+    let font = FontId::new(19.0, serif());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER);
+    let size = Vec2::new(galley.size().x, 32.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let color = if active || resp.hovered() || resp.has_focus() {
+            ui.visuals().text_color()
+        } else {
+            muted
+        };
+        let p = ui.painter();
+        p.galley_with_override_text_color(
+            egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0 - 1.0),
+            galley,
+            color,
+        );
+        if active {
+            p.hline(
+                rect.x_range(),
+                rect.bottom() - 1.0,
+                Stroke::new(2.0, accent),
+            );
+        }
+    }
+    let label = format!("{what}: {text}");
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, active, &label));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A small chevron that steps the picker back or forward.
+fn step_button(ui: &mut Ui, glyph: &str, label: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() || resp.has_focus() {
+            let fill = ui.visuals().widgets.hovered.bg_fill;
+            ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+        }
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(15.0),
+            ui.visuals().text_color(),
+        );
+    }
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+    resp.on_hover_text(label)
+}
+
+/// One choice in the picker: a day (`round`), a month or a year. The chosen
+/// one is filled with the accent; `current` (today, this month, this year)
+/// wears an accent ring.
+fn pick_cell(
+    ui: &mut Ui,
+    size: Vec2,
+    text: &str,
+    label: &str,
+    selected: bool,
+    current: bool,
+    round: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let accent = ui.visuals().hyperlink_color;
+        let shape = if round {
+            Rect::from_center_size(rect.center(), Vec2::splat(size.min_elem() - 4.0))
+        } else {
+            rect.shrink2(Vec2::new(3.0, 3.0))
+        };
+        let radius = if round { PILL } else { CornerRadius::same(9) };
+        let lit = resp.hovered() || resp.has_focus();
+        let (fill, fg) = if selected {
+            (accent, Color32::WHITE)
+        } else if lit {
+            (
+                ui.visuals().widgets.hovered.bg_fill,
+                ui.visuals().text_color(),
+            )
+        } else {
+            (Color32::TRANSPARENT, ui.visuals().text_color())
+        };
+        let p = ui.painter();
+        p.rect_filled(shape, radius, fill);
+        if current && !selected {
+            p.rect_stroke(shape, radius, Stroke::new(1.0, accent), StrokeKind::Inside);
+        }
+        let font = if selected {
+            FontId::new(13.5, crate::ui::theme::medium())
+        } else {
+            FontId::proportional(13.5)
+        };
+        p.text(rect.center(), Align2::CENTER_CENTER, text, font, fg);
+    }
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, label));
+    resp
 }
 
 /// The width of a search field that sits in a filter row: room for a long
@@ -577,6 +933,52 @@ mod tests {
 
     fn data() -> Data {
         Data::new_empty("t", crate::dates::now_ts())
+    }
+
+    #[test]
+    fn date_picker_chooses_day_month_and_year() {
+        use egui_kittest::kittest::Queryable;
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(500.0, 500.0))
+            .build_ui_state(
+                |ui, (styled, d): &mut (bool, chrono::NaiveDate)| {
+                    if !*styled {
+                        // The serif face only exists from the next pass.
+                        crate::ui::theme::install_fonts(ui.ctx());
+                        *styled = true;
+                        return;
+                    }
+                    date_picker(ui, d, "t");
+                },
+                (false, start),
+            );
+        h.run_steps(3);
+        h.get_by_label_contains("31 Jan 2026").click();
+        h.run_steps(3);
+        h.get_by_label("15 Jan 2026").click();
+        h.run_steps(3);
+        assert_eq!(h.state().1.to_string(), "2026-01-15");
+        h.get_by_label("Month: January").click();
+        h.run_steps(3);
+        h.get_by_label("February").click();
+        h.run_steps(3);
+        h.get_by_label("Year: 2026").click();
+        h.run_steps(3);
+        h.get_by_label("2024").click();
+        h.run_steps(3);
+        assert_eq!(h.state().1.to_string(), "2024-02-15");
+        h.get_by_label("Done").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Done").is_none());
+    }
+
+    #[test]
+    fn a_shorter_month_pulls_the_day_back() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        assert_eq!(shift_months(d, 1).to_string(), "2026-02-28");
+        assert_eq!(shift_months(d, -1).to_string(), "2025-12-31");
+        assert_eq!(with_month(d, 2024, 2).to_string(), "2024-02-29");
     }
 
     #[test]

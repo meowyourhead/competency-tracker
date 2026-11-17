@@ -27,6 +27,7 @@ use crate::ui::settings::{self, SettingsState};
 use crate::ui::summary::{self, SummaryState};
 use crate::ui::theme::{self, serif, Palette};
 use crate::ui::widgets::{choice, icon_button, nav_item, presence, search_box, window_button};
+use crate::update::{relaunch, UpdateState, Updater};
 
 const RELOAD_TOAST_EVERY: Duration = Duration::from_secs(60);
 /// Height of the strip holding the window buttons (the system title bar is off).
@@ -38,6 +39,10 @@ const NARROW_W: f32 = 1000.0;
 /// The detail panel takes half the room beside the sidebar, within these.
 const DETAIL_MIN_W: f32 = 380.0;
 const DETAIL_MAX_W: f32 = 620.0;
+/// The page's side margin; the title bar's search starts at the same line.
+const PAGE_MARGIN: i8 = 40;
+/// The widest the title bar's search gets.
+const TITLE_SEARCH_W: f32 = 260.0;
 
 /// What the user clicked in the title bar this frame.
 #[derive(Default)]
@@ -46,22 +51,21 @@ struct TitleBarClicks {
     toggle_theme: bool,
 }
 
-/// The draggable strip at the top: double-click maximises. From the right:
-/// close, maximise / restore, minimise, a hairline, the theme switch, then
-/// the presence capsule (who you are, Editing / Viewing, and the button that
-/// changes it).
-fn title_bar(
+/// The title bar's right-hand controls. From the right: close, maximise /
+/// restore, minimise, a hairline, the theme switch, then the presence capsule
+/// (who you are, Editing / Viewing, and the button that changes it). Returns
+/// the clicks and the left edge of the controls.
+fn title_bar_controls(
     ui: &mut egui::Ui,
     pal: &Palette,
     user: &str,
     editing: bool,
     can_toggle: bool,
     theme: Theme,
-) -> TitleBarClicks {
+) -> (TitleBarClicks, f32) {
     let mut clicks = TitleBarClicks::default();
     let rect = ui.max_rect();
-    let drag = ui.interact(rect, ui.id().with("titlebar_drag"), Sense::click_and_drag());
-    window_drag(ui.ctx(), &drag);
+    let mut left_edge = rect.right();
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -98,9 +102,10 @@ fn title_bar(
             ui.add_space(8.0);
             clicks.toggle_editing = presence(ui, pal, user, editing, can_toggle).clicked();
             ui.add_space(4.0);
+            left_edge = ui.min_rect().left();
         });
     });
-    clicks
+    (clicks, left_edge)
 }
 
 /// Moves the window when `resp` (an empty, draggable area) is dragged, and
@@ -204,6 +209,8 @@ pub(crate) struct Ctx<'a> {
     pub profile_view: &'a mut ProfileView,
     /// Set to a person's id to open their profile on the Personnel page.
     pub open_profile: &'a mut Option<Id>,
+    /// Checks for and installs new versions (Settings → General).
+    pub updater: &'a mut Updater,
 }
 
 pub struct TrackerApp {
@@ -232,6 +239,9 @@ pub struct TrackerApp {
     audit: AuditState,
     settings: SettingsState,
     detail: DetailState,
+    updater: Updater,
+    /// "A new version is available" was shown.
+    update_announced: bool,
 }
 
 impl TrackerApp {
@@ -243,6 +253,7 @@ impl TrackerApp {
     ) -> Self {
         let mut app = Self::build(session, prefs, prefs_path);
         app.style(&cc.egui_ctx);
+        app.updater.check(Some(cc.egui_ctx.clone()));
         app
     }
 
@@ -273,6 +284,8 @@ impl TrackerApp {
             audit: AuditState::default(),
             settings: SettingsState::default(),
             detail: DetailState::default(),
+            updater: Updater::default(),
+            update_announced: false,
         }
     }
 
@@ -313,6 +326,18 @@ impl TrackerApp {
                 egui::UserAttentionType::Informational,
             ));
         }
+        if !self.update_announced {
+            if let UpdateState::Available(r) = self.updater.state() {
+                self.update_announced = true;
+                self.toasts.push(Toast::lasting(
+                    format!(
+                        "Version {} is available. Install it from Settings \u{2192} General.",
+                        r.tag
+                    ),
+                    Duration::from_secs(12),
+                ));
+            }
+        }
         self.handle_close(ctx, now, inst);
         ctx.request_repaint_after(Duration::from_secs(1));
     }
@@ -347,9 +372,6 @@ impl TrackerApp {
         self.toasts.retain(|t| t.until > inst);
         let focus_search =
             self.modal.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K));
-        if focus_search && self.compact_sidebar() {
-            self.set_sidebar_collapsed(false);
-        }
         let pal = theme::palette(self.prefs.theme);
 
         // The window's width in points: at a large display scale on a small
@@ -369,23 +391,12 @@ impl TrackerApp {
                     .fill(pal.sidebar)
                     .inner_margin(Margin::same(12)),
             )
-            .show(ui, |ui| self.sidebar(ui, &pal, focus_search));
-        let editing = self.session.is_editing();
-        let can_toggle = editing || self.can_start_editing();
+            .show(ui, |ui| self.sidebar(ui, &pal));
         let clicks = Panel::top("titlebar")
             .exact_size(TITLEBAR_H)
             .resizable(false)
             .frame(Frame::new().fill(pal.bg))
-            .show(ui, |ui| {
-                title_bar(
-                    ui,
-                    &pal,
-                    self.session.user(),
-                    editing,
-                    can_toggle,
-                    self.prefs.theme,
-                )
-            })
+            .show(ui, |ui| self.title_bar(ui, &pal, focus_search))
             .inner;
         if clicks.toggle_editing {
             self.toggle_editing(now, inst);
@@ -419,13 +430,14 @@ impl TrackerApp {
                     display_scale: &mut self.prefs.display_scale,
                     profile_view: &mut self.prefs.profile_view,
                     open_profile: &mut open_profile,
+                    updater: &mut self.updater,
                 };
                 detail::show(ui, &mut cx, &mut self.detail);
             });
         CentralPanel::default()
             .frame(Frame::new().fill(pal.bg).inner_margin(Margin {
-                left: 40,
-                right: 40,
+                left: PAGE_MARGIN,
+                right: PAGE_MARGIN,
                 top: 8,
                 bottom: 28,
             }))
@@ -441,6 +453,7 @@ impl TrackerApp {
                         display_scale: &mut self.prefs.display_scale,
                         profile_view: &mut self.prefs.profile_view,
                         open_profile: &mut open_profile,
+                        updater: &mut self.updater,
                     };
                     match self.page {
                         Page::Summary => summary::show(ui, &mut cx, &mut self.summary),
@@ -688,7 +701,67 @@ impl TrackerApp {
         }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, pal: &Palette, focus_search: bool) {
+    /// The draggable strip at the top (double-click maximises): the search
+    /// on the left, the app's name in the middle of the window, and the
+    /// presence capsule, theme switch and window buttons on the right.
+    fn title_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        pal: &Palette,
+        focus_search: bool,
+    ) -> TitleBarClicks {
+        let rect = ui.max_rect();
+        let drag = ui.interact(rect, ui.id().with("titlebar_drag"), Sense::click_and_drag());
+        window_drag(ui.ctx(), &drag);
+        let editing = self.session.is_editing();
+        let can_toggle = editing || self.can_start_editing();
+        let user = self.session.user().to_owned();
+        let (clicks, controls_left) =
+            title_bar_controls(ui, pal, &user, editing, can_toggle, self.prefs.theme);
+
+        // The search lines up with the page below it, as wide as there's room for.
+        let left = rect.left() + PAGE_MARGIN as f32;
+        let search_w = (controls_left - 16.0 - left).min(TITLE_SEARCH_W);
+        let mut free_from = left;
+        if search_w >= 120.0 {
+            let area = egui::Rect::from_min_max(
+                egui::pos2(left, rect.top()),
+                egui::pos2(left + search_w, rect.bottom()),
+            );
+            let builder = egui::UiBuilder::new()
+                .max_rect(area)
+                .layout(Layout::left_to_right(Align::Center));
+            // The field's own margins (10 each side) come out of its width.
+            ui.scope_builder(builder, |ui| {
+                self.search_field(ui, search_w - 20.0, focus_search)
+            });
+            free_from = area.right();
+        }
+
+        // The name sits at the window's centre, or as near as the search
+        // and the controls allow; it gives way when there's no room.
+        let name = RichText::new("Competency Tracker")
+            .family(serif())
+            .size(17.0)
+            .color(pal.text);
+        let galley = ui.painter().layout_no_wrap(
+            "Competency Tracker".to_owned(),
+            egui::FontId::new(17.0, serif()),
+            pal.text,
+        );
+        let size = galley.size();
+        let (lo, hi) = (free_from + 20.0, controls_left - 20.0 - size.x);
+        if hi >= lo {
+            let centre = ui.ctx().input(|i| i.viewport_rect()).center().x;
+            let x = (centre - size.x / 2.0).clamp(lo, hi);
+            let at = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - size.y / 2.0), size);
+            // Hover-only, so the strip under it still drags the window.
+            ui.put(at, egui::Label::new(name).selectable(false));
+        }
+        clicks
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         let compact = self.compact_sidebar();
         // The header's empty space moves the window, like a title bar. Added
         // first so the collapse button on top of it still takes its clicks.
@@ -703,14 +776,6 @@ impl TrackerApp {
         );
         window_drag(ui.ctx(), &drag);
         ui.horizontal(|ui| {
-            if !compact {
-                ui.label(
-                    RichText::new("Competency Tracker")
-                        .family(serif())
-                        .size(19.0)
-                        .color(pal.text),
-                );
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let label = if compact {
                     "Expand sidebar"
@@ -723,10 +788,6 @@ impl TrackerApp {
             });
         });
         ui.add_space(8.0);
-        if !compact {
-            self.search_field(ui, focus_search);
-            ui.add_space(8.0);
-        }
         for page in Page::ALL {
             if nav_item(
                 ui,
@@ -743,8 +804,8 @@ impl TrackerApp {
         }
     }
 
-    fn search_field(&mut self, ui: &mut egui::Ui, focus: bool) {
-        let resp = search_box(ui, &mut self.search, "Search  (Ctrl+K)", f32::INFINITY);
+    fn search_field(&mut self, ui: &mut egui::Ui, width: f32, focus: bool) {
+        let resp = search_box(ui, &mut self.search, "Search  (Ctrl+K)", width);
         if focus {
             resp.request_focus();
         }
@@ -803,12 +864,18 @@ impl eframe::App for TrackerApp {
     /// Last resort: the close was not cleared in `show_root` (e.g. the
     /// process is shutting down). Save if possible, else write a rescue copy.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.allow_close {
-            return;
+        if !self.allow_close {
+            let now = now_ts();
+            if self.session.on_exit(now).is_err() {
+                let _ = self.session.abandon(now);
+            }
         }
-        let now = now_ts();
-        if self.session.on_exit(now).is_err() {
-            let _ = self.session.abandon(now);
+        // "Restart now" after an update: the lock is released by now, so the
+        // new version can start editing straight away.
+        if self.updater.restart_requested {
+            if let Err(e) = relaunch() {
+                crate::startup::note(&format!("restart after update failed: {e}"));
+            }
         }
     }
 }
