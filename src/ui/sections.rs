@@ -961,11 +961,14 @@ fn draw_grid(
             name.clone(),
             FontId::new(12.0, medium()),
             if sorted { pal.accent } else { pal.text },
-            COL_W - 30.0,
+            // Room either side for the sort mark, so centred text clears it.
+            COL_W - 40.0,
         );
         job.wrap.max_rows = 2;
+        job.halign = Align::Center;
         let galley = ui.painter().layout_job(job);
-        let pos = egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0);
+        // A centred job lays its lines out around x = 0.
+        let pos = egui::pos2(rect.center().x, rect.center().y - galley.size().y / 2.0);
         hp.galley(pos, galley, pal.text);
         if sorted {
             hp.text(
@@ -1083,32 +1086,34 @@ fn one_line(
     p.layout_job(job)
 }
 
-/// A tinted pill with the due date, its left edge at `left`, centred on `y`.
+/// A tinted pill with the due date (or `none` when there isn't one),
+/// centred on (`cx`, `y`), `h` tall.
 #[allow(clippy::too_many_arguments)]
 fn pill(
     p: &egui::Painter,
     pal: &Palette,
-    left: f32,
+    cx: f32,
     y: f32,
+    h: f32,
     max_w: f32,
     info: &DueInfo,
     status: DueStatus,
     delayed: bool,
+    none: &str,
 ) {
     // Just the date: where it came from is in the tooltip.
-    let mut text = info
-        .due_on
-        .map_or_else(|| "Initial pending".to_owned(), fmt_date);
+    let mut text = info.due_on.map_or_else(|| none.to_owned(), fmt_date);
     if delayed {
         text = format!("{} {text}", icon::PAUSE);
     }
     let (fill, fg) = status_colors(pal, status);
     let galley = p.layout_no_wrap(text, FontId::proportional(11.5), fg);
     let w = (galley.size().x + 16.0).min(max_w);
-    let rect = Rect::from_min_size(egui::pos2(left, y - 10.0), Vec2::new(w, 20.0));
+    let rect = Rect::from_center_size(egui::pos2(cx, y), Vec2::new(w, h));
     p.rect_filled(rect, CornerRadius::same(255), fill);
+    let x = (cx - galley.size().x / 2.0).max(rect.left() + 8.0);
     p.with_clip_rect(rect.shrink2(Vec2::new(6.0, 0.0))).galley(
-        egui::pos2(left + 8.0, y - galley.size().y / 2.0),
+        egui::pos2(x, y - galley.size().y / 2.0),
         galley,
         fg,
     );
@@ -1143,7 +1148,8 @@ fn cell(
     if clickable && resp.hovered() {
         p.rect_filled(rect.shrink(3.0), CornerRadius::same(6), pal.border);
     }
-    let left = rect.left() + 10.0;
+    // Everything in a cell is centred across the column.
+    let cx = rect.center().x;
     let max_w = COL_W - 20.0;
     let completed = !lay.lines.is_empty();
     // The first line of the cell: the middle of the row, or the first stage line.
@@ -1154,8 +1160,8 @@ fn cell(
     };
     let quiet = |p: &egui::Painter, text: &str, color: Color32| {
         p.text(
-            egui::pos2(left, first_y),
-            Align2::LEFT_CENTER,
+            egui::pos2(cx, first_y),
+            Align2::CENTER_CENTER,
             text,
             FontId::proportional(12.0),
             color,
@@ -1172,16 +1178,18 @@ fn cell(
             pill(
                 &p,
                 pal,
-                left,
+                cx,
                 rect.center().y - 7.0,
+                20.0,
                 max_w,
                 info,
                 *status,
                 *delayed,
+                "Initial pending",
             );
             p.text(
-                egui::pos2(left + 2.0, rect.center().y + 11.0),
-                Align2::LEFT_CENTER,
+                egui::pos2(cx, rect.center().y + 11.0),
+                Align2::CENTER_CENTER,
                 &info.next_stage_label,
                 FontId::proportional(11.0),
                 pal.muted,
@@ -1205,27 +1213,34 @@ fn cell(
             let due_line = lay.lines.len() - 1;
             for (k, st) in stages.iter().enumerate().take(due_line) {
                 let y = line_y(k);
-                let at = egui::pos2(left, y);
+                let at = egui::pos2(cx, y);
                 match st {
                     StageCell::Done { on, nth } => {
+                        // The date, and its repeat count beside it, centred
+                        // together.
                         let g =
                             p.layout_no_wrap(fmt_date(*on), FontId::proportional(12.5), pal.text);
-                        let w = g.size().x;
-                        p.galley(egui::pos2(left, y - g.size().y / 2.0), g, pal.text);
-                        if let Some(n) = nth.filter(|n| *n > 1) {
-                            p.text(
-                                egui::pos2(left + w + 6.0, y),
-                                Align2::LEFT_CENTER,
+                        let ord = nth.filter(|n| *n > 1).map(|n| {
+                            p.layout_no_wrap(
                                 crate::schedule::ordinal(n),
                                 FontId::proportional(10.5),
                                 pal.muted,
-                            );
+                            )
+                        });
+                        let gap = 6.0;
+                        let total = g.size().x + ord.as_ref().map_or(0.0, |o| gap + o.size().x);
+                        let x = cx - total / 2.0;
+                        let w = g.size().x;
+                        p.galley(egui::pos2(x, y - g.size().y / 2.0), g, pal.text);
+                        if let Some(o) = ord {
+                            let oy = y - o.size().y / 2.0;
+                            p.galley(egui::pos2(x + w + gap, oy), o, pal.muted);
                         }
                     }
                     StageCell::Skipped => {
                         p.text(
                             at,
-                            Align2::LEFT_CENTER,
+                            Align2::CENTER_CENTER,
                             "Skipped",
                             FontId::proportional(11.5),
                             pal.muted.gamma_multiply(0.8),
@@ -1234,27 +1249,19 @@ fn cell(
                     StageCell::Open => {}
                 }
             }
-            // The next due date: a dot in its status colour, and the date in
-            // that colour too when it needs attention.
-            let y = line_y(due_line);
-            let (_, fg) = status_colors(pal, *status);
-            let color = match status {
-                DueStatus::Overdue | DueStatus::DueSoon => fg,
-                _ => pal.muted,
-            };
-            let mut text = info
-                .due_on
-                .map_or_else(|| "Not scheduled".to_owned(), fmt_date);
-            if *delayed {
-                text = format!("{} {text}", icon::PAUSE);
-            }
-            p.circle_filled(egui::pos2(left + 3.0, y), 3.0, fg);
-            p.text(
-                egui::pos2(left + 11.0, y),
-                Align2::LEFT_CENTER,
-                text,
-                FontId::proportional(12.0),
-                color,
+            // The next due date in a status pill, as in the Next due view,
+            // a little shorter to sit inside its stage line.
+            pill(
+                &p,
+                pal,
+                cx,
+                line_y(due_line),
+                LINE_H - 2.0,
+                max_w,
+                info,
+                *status,
+                *delayed,
+                "Not scheduled",
             );
             let mut lines = Vec::new();
             for (k, st) in stages.iter().enumerate() {
