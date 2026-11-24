@@ -3,15 +3,18 @@
 //!
 //! - **Next due**: each cell shows the next-due pill and the stage it's for.
 //! - **Completed**: like the master tracking workbook, each person gets one
-//!   line per stage (Initial, Semi-annual, Annual) with the date it was
-//!   completed, and the stage still to do shows when it's due.
+//!   line per stage (Initial, Semi-annual, and every Annual they have done)
+//!   with the date it was completed, then when the next one is due.
+//!
+//! People are listed in the section's default order (the workbook's) unless
+//! another sort is picked.
 //!
 //! The header row and the name column stay put while the cells scroll; the
 //! grid is exactly as tall as its rows, so it only scrolls when they don't fit.
 
 use chrono::NaiveDate;
 use egui::text::LayoutJob;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use egui::{
     Align, Align2, Button, Color32, CornerRadius, CursorIcon, FontId, Layout, Popup, Rect,
@@ -20,10 +23,10 @@ use egui::{
 use egui_phosphor::regular as icon;
 
 use crate::dates::fmt_date;
-use crate::model::{AssignState, Data, Id, Section};
+use crate::model::{AssignState, Data, Id, Rule, Section};
 use crate::ops;
 use crate::query::{distinct_titles, Index, StatusFilter};
-use crate::schedule::{classify, next_due, DueInfo, DueStatus};
+use crate::schedule::{classify, next_due, stage_label, DueInfo, DueStatus};
 use crate::session::Session;
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{medium, Palette};
@@ -57,6 +60,39 @@ pub(crate) enum View {
     Completed,
 }
 
+/// How the people in a grid are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RowSort {
+    /// The section's own order, as in the workbook.
+    #[default]
+    Default,
+    NameAsc,
+    NameDesc,
+    Title,
+    /// Whoever's next assessment is due first.
+    Due,
+}
+
+impl RowSort {
+    const ALL: [RowSort; 5] = [
+        RowSort::Default,
+        RowSort::NameAsc,
+        RowSort::NameDesc,
+        RowSort::Title,
+        RowSort::Due,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            RowSort::Default => "Default order",
+            RowSort::NameAsc => "Name A\u{2013}Z",
+            RowSort::NameDesc => "Name Z\u{2013}A",
+            RowSort::Title => "Title",
+            RowSort::Due => "Due date",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SectionsState {
     /// Every section at once, one grid per section.
@@ -72,6 +108,8 @@ pub(crate) struct SectionsState {
     pub text: String,
     /// Rows sorted by this test's due date (earliest first, no date last).
     pub sort_by_test: Option<Id>,
+    /// The order of the rows otherwise.
+    pub sort: RowSort,
     /// Every live section's grid, and all of them as one grouped grid, for
     /// (revision, date).
     cache: Option<(u64, NaiveDate, HashMap<Id, Grid>, Combined)>,
@@ -93,17 +131,22 @@ struct Combined {
     groups: Vec<Group>,
 }
 
-/// What a person has done at one stage of one test.
-#[derive(Clone)]
-enum StageCell {
-    /// Completed on this date; `nth` counts repeats of the last stage
-    /// (the 3rd Annual is `Some(3)`).
-    Done {
-        on: NaiveDate,
-        nth: Option<u32>,
-    },
-    Skipped,
-    Open,
+/// One completion of a test by a person.
+#[derive(Clone, Copy)]
+struct Done {
+    /// Its place in the schedule: 0 Initial, …, then one per repeat.
+    stage: u32,
+    on: NaiveDate,
+    unconfirmed: bool,
+}
+
+/// One line of a person's block in the Completed view.
+struct Line {
+    /// `None` is the "Next due" line.
+    stage: Option<u32>,
+    /// Which of the completions recorded for that stage (normally the only one).
+    nth: usize,
+    label: String,
 }
 
 #[derive(Clone)]
@@ -112,9 +155,9 @@ enum CellView {
         info: DueInfo,
         status: DueStatus,
         delayed: bool,
-        /// One entry per stage of the test's rule; the last one holds the
-        /// latest of its repeats.
-        stages: Vec<StageCell>,
+        /// Every completion, oldest first.
+        done: Vec<Done>,
+        skipped: Vec<u32>,
     },
     Na,
     Unassigned,
@@ -131,8 +174,8 @@ struct Row {
 struct Grid {
     /// (test id, test name), in configured order.
     columns: Vec<(Id, String)>,
-    /// Each column's stage labels (from its schedule rule).
-    stages: Vec<Vec<String>>,
+    /// Each column's schedule rule.
+    rules: Vec<Rule>,
     rows: Vec<Row>,
 }
 
@@ -144,6 +187,14 @@ enum GridAction {
 }
 
 impl SectionsState {
+    /// Shows everyone in the section again.
+    pub(crate) fn clear_filters(&mut self) {
+        self.status = StatusFilter::All;
+        self.test = None;
+        self.title = None;
+        self.text.clear();
+    }
+
     /// Rebuilds the grids only when the data revision or the date changed.
     fn refresh(&mut self, session: &Session, today: NaiveDate, sections: &[&Section]) {
         let rev = session.revision();
@@ -166,7 +217,7 @@ impl SectionsState {
 fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Combined {
     let all = data.sections_sorted();
     let mut columns = Vec::new();
-    let mut stages = Vec::new();
+    let mut rules = Vec::new();
     let mut groups = Vec::new();
     for s in sections {
         let g = &grids[&s.id];
@@ -181,9 +232,10 @@ fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Com
             len: g.columns.len(),
         });
         columns.extend(g.columns.iter().cloned());
-        stages.extend(g.stages.iter().cloned());
+        rules.extend(g.rules.iter().cloned());
     }
-    // Everyone in any section, by name.
+    // Everyone in any section: the first section's people in its order, then
+    // whoever the next section adds, and so on.
     let mut people: Vec<(&str, &str, &str)> = Vec::new();
     for s in sections {
         for r in &grids[&s.id].rows {
@@ -192,7 +244,6 @@ fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Com
             }
         }
     }
-    people.sort_by_key(|(_, name, _)| name.to_lowercase());
     let rows = people
         .into_iter()
         .map(|(id, name, title)| {
@@ -215,7 +266,7 @@ fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Com
     Combined {
         grid: Grid {
             columns,
-            stages,
+            rules,
             rows,
         },
         groups,
@@ -231,7 +282,11 @@ fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> 
         .filter(|s| s.status == crate::model::StaffStatus::Active)
         .filter(|s| tests.iter().any(|t| s.assignments.contains_key(&t.id)))
         .collect();
-    staff.sort_by_key(|s| s.name.to_lowercase());
+    // The workbook's order; people it doesn't list follow by name.
+    staff.sort_by_key(|s| {
+        let place = section.staff_order.iter().position(|id| *id == s.id);
+        (place.unwrap_or(usize::MAX), s.name.to_lowercase())
+    });
     let rows = staff
         .into_iter()
         .map(|s| {
@@ -247,12 +302,22 @@ fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> 
                             .delay_notes(&s.id, &t.id)
                             .iter()
                             .any(|n| n.for_stage_index == info.next_stage_index);
-                        let stages = stage_cells(rule, &pair);
+                        let mut done: Vec<Done> = pair
+                            .records
+                            .iter()
+                            .map(|r| Done {
+                                stage: r.stage_index,
+                                on: r.completed_on,
+                                unconfirmed: r.unconfirmed,
+                            })
+                            .collect();
+                        done.sort_by_key(|d| (d.on, d.stage));
                         CellView::Due {
                             info,
                             status,
                             delayed,
-                            stages,
+                            done,
+                            skipped: pair.skipped,
                         }
                     }
                     Some(AssignState::Na) => CellView::Na,
@@ -272,49 +337,12 @@ fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> 
             .iter()
             .map(|t| (t.id.clone(), t.name.clone()))
             .collect(),
-        stages: tests
+        rules: tests
             .iter()
-            .map(|t| {
-                let rule = data.rule_for_test(&t.id);
-                rule.stages.iter().map(|s| s.label.clone()).collect()
-            })
+            .map(|t| data.rule_for_test(&t.id).clone())
             .collect(),
         rows,
     }
-}
-
-/// One [`StageCell`] per stage of `rule`: the latest completion of each
-/// stage, the last one standing for all of its repeats.
-fn stage_cells(rule: &crate::model::Rule, pair: &crate::schedule::PairState) -> Vec<StageCell> {
-    let n = rule.stages.len();
-    let Some(last) = n.checked_sub(1) else {
-        return Vec::new();
-    };
-    let last = last as u32;
-    (0..n as u32)
-        .map(|k| {
-            let latest = pair
-                .records
-                .iter()
-                .filter(|r| {
-                    if k == last {
-                        r.stage_index >= last
-                    } else {
-                        r.stage_index == k
-                    }
-                })
-                .max_by_key(|r| (r.completed_on, r.stage_index));
-            match latest {
-                Some(r) => StageCell::Done {
-                    on: r.completed_on,
-                    nth: (k == last && rule.stages[k as usize].ordinal)
-                        .then(|| r.stage_index - last + 1),
-                },
-                None if pair.skipped.contains(&k) => StageCell::Skipped,
-                None => StageCell::Open,
-            }
-        })
-        .collect()
 }
 
 fn matches_status(cell: &CellView, f: StatusFilter) -> bool {
@@ -343,6 +371,7 @@ fn visible(
     title: Option<&String>,
     needle: &str,
     status: StatusFilter,
+    sort: RowSort,
     sort_by_test: Option<&Id>,
 ) -> (Vec<usize>, Vec<usize>, Option<usize>) {
     let cols: Vec<usize> = (0..grid.columns.len())
@@ -363,27 +392,73 @@ fn visible(
         .collect();
     let sort_col =
         sort_by_test.and_then(|t| cols.iter().copied().find(|&c| grid.columns[c].0 == *t));
+    let due = |r: usize, c: usize| match &grid.rows[r].cells[c] {
+        CellView::Due { info, .. } => info.due_on,
+        _ => None,
+    };
+    // Each sort is stable, so ties keep the default order.
+    let name = |r: usize| grid.rows[r].name.to_lowercase();
+    match sort {
+        RowSort::Default => {}
+        RowSort::NameAsc => rows.sort_by_key(|&r| name(r)),
+        RowSort::NameDesc => rows.sort_by_key(|&r| std::cmp::Reverse(name(r))),
+        RowSort::Title => rows.sort_by_key(|&r| {
+            let title = grid.rows[r].title.to_lowercase();
+            (title.is_empty(), title)
+        }),
+        RowSort::Due => rows.sort_by_key(|&r| {
+            let first = cols.iter().filter_map(|&c| due(r, c)).min();
+            (first.is_none(), first)
+        }),
+    }
     if let Some(c) = sort_col {
-        let due = |r: usize| match &grid.rows[r].cells[c] {
-            CellView::Due { info, .. } => info.due_on,
-            _ => None,
-        };
-        rows.sort_by_key(|&r| (due(r).is_none(), due(r)));
+        rows.sort_by_key(|&r| (due(r, c).is_none(), due(r, c)));
     }
     (cols, rows, sort_col)
 }
 
-/// The lines the Completed view shows per person for `cols`: the stages of
-/// the test with the most (normally every test shares the Global rule), then
-/// "Next due", as in the workbook.
-fn stage_lines(grid: &Grid, cols: &[usize]) -> Vec<String> {
-    let mut lines = cols
+/// The lines the Completed view shows for one person: the stages of the test
+/// with the most (normally every test shares the Global rule), a line for
+/// every further annual they have done in any of `cols`, then "Next due".
+fn stage_lines(grid: &Grid, cols: &[usize], row: &Row) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let Some(rule) = cols
         .iter()
-        .map(|&c| &grid.stages[c])
-        .max_by_key(|s| s.len())
-        .cloned()
-        .unwrap_or_default();
-    lines.push(NEXT_DUE.to_owned());
+        .map(|&c| &grid.rules[c])
+        .max_by_key(|r| r.stages.len())
+    else {
+        return lines;
+    };
+    // How many lines each stage needs (more than one only when a cell has
+    // several completions of the same stage).
+    let mut need: BTreeMap<u32, usize> = (0..rule.stages.len() as u32).map(|k| (k, 1)).collect();
+    for &c in cols {
+        if let CellView::Due { done, .. } = &row.cells[c] {
+            for d in done {
+                let n = done.iter().filter(|x| x.stage == d.stage).count();
+                let slot = need.entry(d.stage).or_default();
+                *slot = n.max(*slot);
+            }
+        }
+    }
+    for (stage, n) in need {
+        for nth in 0..n {
+            lines.push(Line {
+                stage: Some(stage),
+                nth,
+                label: if nth == 0 {
+                    stage_label(rule, stage)
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+    lines.push(Line {
+        stage: None,
+        nth: 0,
+        label: NEXT_DUE.to_owned(),
+    });
     lines
 }
 
@@ -475,6 +550,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
         title,
         text,
         sort_by_test,
+        sort,
         cache,
         ..
     } = state;
@@ -485,7 +561,19 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
     {
         *test = None;
     }
-    filters(ui, pal, data, &grid.columns, status, test, title, text);
+    if filters(
+        ui,
+        pal,
+        data,
+        &grid.columns,
+        status,
+        test,
+        title,
+        text,
+        sort,
+    ) {
+        *sort_by_test = None;
+    }
     ui.add_space(10.0);
 
     if grid.columns.is_empty() {
@@ -511,6 +599,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
         title.as_ref(),
         &needle,
         *status,
+        *sort,
         sort_by_test.as_ref(),
     );
     if rows.is_empty() {
@@ -554,6 +643,7 @@ fn show_all(
         title,
         text,
         sort_by_test,
+        sort,
         cache,
         ..
     } = state;
@@ -573,7 +663,9 @@ fn show_all(
     {
         *test = None;
     }
-    filters(ui, pal, data, &columns, status, test, title, text);
+    if filters(ui, pal, data, &columns, status, test, title, text, sort) {
+        *sort_by_test = None;
+    }
     ui.add_space(10.0);
     if grid.columns.is_empty() {
         let body = if sections.is_empty() {
@@ -599,6 +691,7 @@ fn show_all(
         title.as_ref(),
         &needle,
         *status,
+        *sort,
         sort_by_test.as_ref(),
     );
     if rows.is_empty() {
@@ -648,7 +741,8 @@ fn view_switch(ui: &mut egui::Ui, pal: &Palette, view: &mut View) {
     }
 }
 
-/// One row: the name search, then the status, test system and title chips.
+/// One row: the name search, the status, test system and title chips, then
+/// the sort. Returns true when a sort was picked.
 #[allow(clippy::too_many_arguments)]
 fn filters(
     ui: &mut egui::Ui,
@@ -659,7 +753,9 @@ fn filters(
     test: &mut Option<Id>,
     title: &mut Option<String>,
     text: &mut String,
-) {
+    sort: &mut RowSort,
+) -> bool {
+    let mut sorted = false;
     let statuses = [
         (StatusFilter::Overdue, "Overdue".to_owned()),
         (StatusFilter::DueSoon, "Due soon".to_owned()),
@@ -679,6 +775,7 @@ fn filters(
         }
         chip_select(ui, "Test system", test, columns);
         chip_select(ui, "Title", title, &titles);
+        sorted = sort_select(ui, sort);
         let any = *status != StatusFilter::All
             || test.is_some()
             || title.is_some()
@@ -694,16 +791,83 @@ fn filters(
             text.clear();
         }
     });
+    sorted
+}
+
+/// The sort dropdown. Returns true when one was picked (even the current one,
+/// which then undoes sorting by a column).
+fn sort_select(ui: &mut egui::Ui, sort: &mut RowSort) -> bool {
+    let button = Button::new(format!(
+        "{}  Sort: {}  {}",
+        icon::SORT_ASCENDING,
+        sort.label(),
+        icon::CARET_DOWN
+    ))
+    .corner_radius(255)
+    .selected(*sort != RowSort::Default);
+    let resp = ui.add(button);
+    let mut picked = false;
+    Popup::menu(&resp).show(|ui| {
+        for s in RowSort::ALL {
+            if ui.selectable_label(*sort == s, s.label()).clicked() {
+                *sort = s;
+                picked = true;
+            }
+        }
+    });
+    picked
 }
 
 /// Where the grid's parts sit this frame.
 struct Layout2 {
-    /// Height of one person's row (a block of stage lines when Completed).
-    row_h: f32,
-    /// Stage lines per person (Completed view); empty for Next due.
-    lines: Vec<String>,
+    /// Each visible row's top, and then the end of the last one. A row is a
+    /// block of stage lines when Completed, so rows differ in height.
+    tops: Vec<f32>,
+    /// Stage lines per visible row (Completed view); empty for Next due.
+    lines: Vec<Vec<Line>>,
     /// Name column, plus the stage column when Completed.
     frozen_w: f32,
+}
+
+impl Layout2 {
+    fn new(view: View, grid: &Grid, cols: &[usize], rows: &[usize]) -> Layout2 {
+        let lines: Vec<Vec<Line>> = match view {
+            View::Due => Vec::new(),
+            View::Completed => rows
+                .iter()
+                .map(|&r| stage_lines(grid, cols, &grid.rows[r]))
+                .collect(),
+        };
+        let mut tops = vec![0.0];
+        for i in 0..rows.len() {
+            let h = match lines.get(i) {
+                Some(l) => l.len() as f32 * LINE_H + 2.0 * BLOCK_PAD,
+                None => ROW_H,
+            };
+            tops.push(tops[i] + h);
+        }
+        Layout2 {
+            tops,
+            lines,
+            frozen_w: match view {
+                View::Due => NAME_W,
+                View::Completed => NAME_W + STAGE_W,
+            },
+        }
+    }
+
+    fn height(&self) -> f32 {
+        self.tops.last().copied().unwrap_or(0.0)
+    }
+
+    fn row_h(&self, i: usize) -> f32 {
+        self.tops[i + 1] - self.tops[i]
+    }
+
+    /// The row at `y` (from the top of the first row).
+    fn row_at(&self, y: f32) -> Option<usize> {
+        (y >= 0.0 && y < self.height()).then(|| self.tops.partition_point(|t| *t <= y) - 1)
+    }
 }
 
 /// Draws the grid in the remaining space: a fixed corner, a header strip that
@@ -725,22 +889,7 @@ fn draw_grid(
     view: View,
 ) -> Option<GridAction> {
     let mut action = None;
-    let lay = match view {
-        View::Due => Layout2 {
-            row_h: ROW_H,
-            lines: Vec::new(),
-            frozen_w: NAME_W,
-        },
-        View::Completed => {
-            let lines = stage_lines(grid, cols);
-            Layout2 {
-                row_h: lines.len() as f32 * LINE_H + 2.0 * BLOCK_PAD,
-                lines,
-                frozen_w: NAME_W + STAGE_W,
-            }
-        }
-    };
-    let row_h = lay.row_h;
+    let lay = Layout2::new(view, grid, cols, rows);
     let band = if groups.is_empty() { 0.0 } else { BAND_H };
     let head_h = HEAD_H + band;
     // Runs of visible columns per group: (group, first visible j, end j).
@@ -761,12 +910,13 @@ fn draw_grid(
     // Size the frame to the content (1 px border each side), capped by the
     // space left on the page.
     let avail = ui.available_rect_before_wrap();
-    let mut content = Vec2::new(cols.len() as f32 * COL_W, rows.len() as f32 * row_h);
+    let mut content = Vec2::new(cols.len() as f32 * COL_W, lay.height());
     if lay.frozen_w + content.x + 2.0 > avail.width() {
         content.y += BAR_ROOM;
     }
     let width = (lay.frozen_w + content.x + 2.0).min(avail.width());
-    let least = (head_h + 2.0 * row_h + 2.0).min(avail.height());
+    let two_rows = lay.tops[rows.len().min(2)];
+    let least = (head_h + two_rows + 2.0).min(avail.height());
     let height = (head_h + content.y + 2.0).min(avail.height()).max(least);
     let outer = Rect::from_min_size(avail.min, Vec2::new(width, height));
     ui.allocate_rect(outer, Sense::hover());
@@ -795,10 +945,7 @@ fn draw_grid(
         .ctx()
         .pointer_hover_pos()
         .filter(|_| ui.rect_contains_pointer(body.union(names)))
-        .and_then(|p| {
-            let i = ((p.y - body.top() + prev.y) / row_h).floor();
-            (i >= 0.0 && (i as usize) < rows.len()).then_some(i as usize)
-        });
+        .and_then(|p| lay.row_at(p.y - body.top() + prev.y));
 
     // The wheel over the header or the name column scrolls the cells too.
     let mut area = ScrollArea::both()
@@ -837,13 +984,14 @@ fn draw_grid(
                 );
             }
         }
-        let first = (viewport.top() / row_h).floor().max(0.0) as usize;
-        let last = ((viewport.bottom() / row_h).ceil() as usize).min(rows.len());
+        let first = lay.row_at(viewport.top().max(0.0)).unwrap_or(0);
+        let last = lay.row_at(viewport.bottom()).map_or(rows.len(), |i| i + 1);
         let c0 = (viewport.left() / COL_W).floor().max(0.0) as usize;
         let c1 = ((viewport.right() / COL_W).ceil() as usize).min(cols.len());
         let xs = (origin.x + viewport.left())..=(origin.x + viewport.right());
         for (i, &r) in rows.iter().enumerate().take(last).skip(first) {
-            let top = origin.y + i as f32 * row_h;
+            let top = origin.y + lay.tops[i];
+            let row_h = lay.row_h(i);
             if hover_row == Some(i) {
                 let rect = Rect::from_x_y_ranges(xs.clone(), top..=top + row_h);
                 p.rect_filled(rect, 0, pal.sidebar);
@@ -856,7 +1004,8 @@ fn draw_grid(
                 let min = egui::pos2(origin.x + j as f32 * COL_W, top);
                 let rect = Rect::from_min_size(min, Vec2::new(COL_W, row_h));
                 let test = &grid.columns[c];
-                let hit = cell(ui, pal, editing, rect, row, test, &row.cells[c], &lay);
+                let lines = lay.lines.get(i).map(Vec::as_slice);
+                let hit = cell(ui, pal, editing, rect, row, test, &row.cells[c], lines);
                 if hit.is_some() {
                     action = hit;
                 }
@@ -987,7 +1136,8 @@ fn draw_grid(
     // Name column (and stage labels when Completed).
     let np = ui.painter_at(names);
     for (i, &r) in rows.iter().enumerate() {
-        let top = names.top() + i as f32 * row_h - offset.y;
+        let top = names.top() + lay.tops[i] - offset.y;
+        let row_h = lay.row_h(i);
         if top > names.bottom() || top + row_h < names.top() {
             continue;
         }
@@ -1022,12 +1172,12 @@ fn draw_grid(
             let g = one_line(&p, &row.title, FontId::proportional(11.5), pal.muted, fit);
             p.galley(egui::pos2(x, title_y - g.size().y / 2.0), g, pal.muted);
         }
-        for (k, label) in lay.lines.iter().enumerate() {
+        for (k, l) in lay.lines.get(i).into_iter().flatten().enumerate() {
             let y = top + BLOCK_PAD + (k as f32 + 0.5) * LINE_H;
             np.text(
                 egui::pos2(names.left() + NAME_W, y),
                 Align2::LEFT_CENTER,
-                label,
+                &l.label,
                 FontId::proportional(11.5),
                 pal.muted,
             );
@@ -1131,7 +1281,8 @@ fn cell(
     row: &Row,
     test: &(Id, String),
     view: &CellView,
-    lay: &Layout2,
+    // The person's stage lines, in the Completed view.
+    lines: Option<&[Line]>,
 ) -> Option<GridAction> {
     let clickable = !matches!(view, CellView::Unassigned) || editing;
     let sense = if clickable {
@@ -1151,7 +1302,7 @@ fn cell(
     // Everything in a cell is centred across the column.
     let cx = rect.center().x;
     let max_w = COL_W - 20.0;
-    let completed = !lay.lines.is_empty();
+    let completed = lines.is_some();
     // The first line of the cell: the middle of the row, or the first stage line.
     let first_y = if completed {
         rect.top() + BLOCK_PAD + LINE_H / 2.0
@@ -1207,46 +1358,38 @@ fn cell(
             info,
             status,
             delayed,
-            stages,
+            done,
+            skipped,
         } => {
+            let lines = lines.unwrap_or_default();
             let line_y = |k: usize| rect.top() + BLOCK_PAD + (k as f32 + 0.5) * LINE_H;
-            let due_line = lay.lines.len() - 1;
-            for (k, st) in stages.iter().enumerate().take(due_line) {
-                let y = line_y(k);
-                let at = egui::pos2(cx, y);
-                match st {
-                    StageCell::Done { on, nth } => {
-                        // The date, and its repeat count beside it, centred
-                        // together.
-                        let g =
-                            p.layout_no_wrap(fmt_date(*on), FontId::proportional(12.5), pal.text);
-                        let ord = nth.filter(|n| *n > 1).map(|n| {
-                            p.layout_no_wrap(
-                                crate::schedule::ordinal(n),
-                                FontId::proportional(10.5),
-                                pal.muted,
-                            )
-                        });
-                        let gap = 6.0;
-                        let total = g.size().x + ord.as_ref().map_or(0.0, |o| gap + o.size().x);
-                        let x = cx - total / 2.0;
-                        let w = g.size().x;
-                        p.galley(egui::pos2(x, y - g.size().y / 2.0), g, pal.text);
-                        if let Some(o) = ord {
-                            let oy = y - o.size().y / 2.0;
-                            p.galley(egui::pos2(x + w + gap, oy), o, pal.muted);
-                        }
-                    }
-                    StageCell::Skipped => {
-                        p.text(
-                            at,
-                            Align2::CENTER_CENTER,
-                            "Skipped",
-                            FontId::proportional(11.5),
-                            pal.muted.gamma_multiply(0.8),
-                        );
-                    }
-                    StageCell::Open => {}
+            let due_line = lines.len().saturating_sub(1);
+            for (k, l) in lines.iter().enumerate() {
+                let Some(stage) = l.stage else { continue };
+                let at = egui::pos2(cx, line_y(k));
+                let this = done.iter().filter(|d| d.stage == stage).nth(l.nth);
+                if let Some(d) = this {
+                    // An unconfirmed date (imported, not ticked) reads as such.
+                    let color = if d.unconfirmed {
+                        pal.yellow_fg
+                    } else {
+                        pal.text
+                    };
+                    p.text(
+                        at,
+                        Align2::CENTER_CENTER,
+                        fmt_date(d.on),
+                        FontId::proportional(12.5),
+                        color,
+                    );
+                } else if l.nth == 0 && skipped.contains(&stage) {
+                    p.text(
+                        at,
+                        Align2::CENTER_CENTER,
+                        "Skipped",
+                        FontId::proportional(11.5),
+                        pal.muted.gamma_multiply(0.8),
+                    );
                 }
             }
             // The next due date in a status pill, as in the Next due view,
@@ -1263,28 +1406,26 @@ fn cell(
                 *delayed,
                 "Not scheduled",
             );
-            let mut lines = Vec::new();
-            for (k, st) in stages.iter().enumerate() {
-                let label = lay.lines.get(k).map_or("", String::as_str);
-                match st {
-                    StageCell::Done { on, nth } => {
-                        let label = match nth {
-                            Some(n) => format!("{} {label}", crate::schedule::ordinal(*n)),
-                            None => label.to_owned(),
-                        };
-                        lines.push(format!("{label}: {}", fmt_date(*on)));
-                    }
-                    StageCell::Skipped => lines.push(format!("{label}: skipped")),
-                    StageCell::Open => {}
+            let mut text = Vec::new();
+            for l in lines.iter().filter(|l| l.nth == 0) {
+                let Some(stage) = l.stage else { continue };
+                let mut any = false;
+                for d in done.iter().filter(|d| d.stage == stage) {
+                    any = true;
+                    let mark = if d.unconfirmed { " (unconfirmed)" } else { "" };
+                    text.push(format!("{}: {}{mark}", l.label, fmt_date(d.on)));
+                }
+                if !any && skipped.contains(&stage) {
+                    text.push(format!("{}: skipped", l.label));
                 }
             }
-            lines.push(format!(
+            text.push(format!(
                 "Next: {}, {} ({})",
                 info.next_stage_label,
                 due_pill_text(info),
                 status_label(*status)
             ));
-            tip = Some(format!("{}: {}\n{}", row.name, test.1, lines.join("\n")));
+            tip = Some(format!("{}: {}\n{}", row.name, test.1, text.join("\n")));
         }
         CellView::Na => quiet(&p, "N/A", pal.muted),
         CellView::Unassigned => quiet(&p, "\u{2014}", pal.muted.gamma_multiply(0.45)),

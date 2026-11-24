@@ -158,6 +158,7 @@ const GAP: f32 = 16.0;
 enum Pick {
     Detail(Id, Id),
     Profile(Id),
+    Section(Id),
 }
 
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
@@ -198,13 +199,17 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
     if two {
         ui.columns(2, |cols| {
             cols[0].spacing_mut().item_spacing.x = GAP;
-            sections_card(&mut cols[0], pal, data, &shown, filter);
+            if let Some(p) = sections_card(&mut cols[0], pal, data, &shown, filter) {
+                pick = Some(p);
+            }
             if let Some(p) = actions_card(&mut cols[1], pal, &shown, tab, all_actions, soon_days) {
                 pick = Some(p);
             }
         });
     } else {
-        sections_card(ui, pal, data, &shown, filter);
+        if let Some(p) = sections_card(ui, pal, data, &shown, filter) {
+            pick = Some(p);
+        }
         ui.add_space(GAP);
         if let Some(p) = actions_card(ui, pal, &shown, tab, all_actions, soon_days) {
             pick = Some(p);
@@ -217,6 +222,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SummaryState) {
     match pick {
         Some(Pick::Detail(s, t)) => *cx.open_detail = Some((s, t)),
         Some(Pick::Profile(s)) => *cx.open_profile = Some(s),
+        Some(Pick::Section(s)) => *cx.open_section = Some(s),
         None => {}
     }
 }
@@ -505,14 +511,15 @@ fn kpi_cell(
 }
 
 /// Each section: its share of current assessments as a bar split by status,
-/// the percentage, and how many are overdue. Clicking a row filters by it.
+/// the percentage, and how many are overdue. Clicking a row filters by it;
+/// the button at its end opens the section on the Sections page.
 fn sections_card(
     ui: &mut egui::Ui,
     pal: &Palette,
     data: &Data,
     items: &[&DueItem],
     f: &mut SummaryFilter,
-) {
+) -> Option<Pick> {
     let mut by: HashMap<&str, [usize; 4]> = HashMap::new();
     let mut current: HashMap<&str, usize> = HashMap::new();
     for i in items {
@@ -527,6 +534,7 @@ fn sections_card(
         }
     }
     let mut clicked = None;
+    let mut open = None;
     card(
         ui,
         pal,
@@ -554,7 +562,10 @@ fn sections_card(
                 let pct = (cur as f32 / total.max(1) as f32 * 100.0).round() as usize;
                 let selected = f.section.as_deref() == Some(s.id.as_str());
                 let color = section_color(data, &s.id).unwrap_or(pal.muted);
-                if section_row(ui, pal, &s.name, color, name_w, counts, pct, selected).clicked() {
+                let (row, go) = section_row(ui, pal, &s.name, color, name_w, counts, pct, selected);
+                if go.clicked() {
+                    open = Some(Pick::Section(s.id.clone()));
+                } else if row.clicked() {
                     clicked = Some((s.id.clone(), selected));
                 }
             }
@@ -575,8 +586,13 @@ fn sections_card(
     if let Some((id, was)) = clicked {
         f.section = if was { None } else { Some(id) };
     }
+    open
 }
 
+/// Width of a section row's "open" button.
+const GO_W: f32 = 30.0;
+
+/// The row's response and its "open" button's.
 #[allow(clippy::too_many_arguments)]
 fn section_row(
     ui: &mut egui::Ui,
@@ -587,7 +603,7 @@ fn section_row(
     counts: [usize; 4],
     pct: usize,
     selected: bool,
-) -> egui::Response {
+) -> (egui::Response, egui::Response) {
     let h = 34.0;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -608,7 +624,7 @@ fn section_row(
             Rect::from_min_size(egui::pos2(rect.left(), mid - 10.0), Vec2::new(chip_w, 20.0));
         paint_section_chip(ui, pal, chip, name, color);
         let overdue = counts[2];
-        let tail_w = 150.0;
+        let tail_w = 150.0 + GO_W;
         let pct_g = p.layout_no_wrap(format!("{pct}%"), FontId::new(14.0, medium()), pal.text);
         let note = if overdue > 0 {
             format!("{overdue} overdue")
@@ -629,14 +645,48 @@ fn section_row(
             pal.red_fg,
         );
     }
+    // Over the row, so a click on it doesn't also filter.
+    let go_rect = Rect::from_center_size(
+        egui::pos2(rect.right() - GO_W / 2.0, rect.center().y),
+        Vec2::splat(26.0),
+    );
+    let go = ui.interact(go_rect, resp.id.with("open"), Sense::click());
+    if ui.is_rect_visible(go_rect) {
+        let p = ui.painter();
+        let (fill, fg) = if go.hovered() {
+            (pal.accent.gamma_multiply(0.16), pal.accent)
+        } else {
+            (Color32::TRANSPARENT, pal.muted)
+        };
+        p.rect(
+            go_rect,
+            8,
+            fill,
+            Stroke::new(1.0, if go.hovered() { pal.accent } else { pal.border }),
+            egui::StrokeKind::Inside,
+        );
+        p.text(
+            go_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icon::ARROW_RIGHT,
+            FontId::proportional(14.0),
+            fg,
+        );
+    }
+    let go_label = format!("Open {name} in Sections");
+    go.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &go_label));
+    let go = go
+        .on_hover_text(&go_label)
+        .on_hover_cursor(CursorIcon::PointingHand);
     let total: usize = counts.iter().sum();
     let label = format!("{name} {pct}% current");
     resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, &label));
-    resp.on_hover_text(format!(
+    let resp = resp.on_hover_text(format!(
         "{name}: {total} assessments\nUp to date {}, due soon {}, overdue {}, not done yet {}\nClick to show only this section",
         counts[0], counts[1], counts[2], counts[3]
     ))
-    .on_hover_cursor(CursorIcon::PointingHand)
+    .on_hover_cursor(CursorIcon::PointingHand);
+    (resp, go)
 }
 
 /// A bar split into the statuses in [`Health::ALL`] order, rounded at its ends.

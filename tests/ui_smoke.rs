@@ -554,10 +554,153 @@ fn detail_shows_four_then_more() {
     }
     h.get_by_label("Show 2 older entries").click();
     h.run();
-    for line in &lines {
-        h.get_by_label(line);
-    }
+    // Oldest at the top, down to the latest.
+    let tops: Vec<f32> = lines
+        .iter()
+        .map(|line| h.get_by_label(line).rect().top())
+        .collect();
+    assert!(tops.windows(2).all(|w| w[0] < w[1]), "{tops:?}");
     assert!(h.query_by_label("Show 2 older entries").is_none());
+}
+
+/// Every annual has its own line: six completions and the next due date.
+#[test]
+fn completed_view_gives_every_annual_its_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _) = six_completions(&dir);
+    button(&h, "Sections").click();
+    h.run();
+    let due_h = h.get_by_label("Agnes \u{b7} Cobas").rect().height();
+    button(&h, "Completed").click();
+    h.run();
+    let h2 = h.get_by_label("Agnes \u{b7} Cobas").rect().height();
+    assert!(due_h < 50.0 && h2 >= 7.0 * 20.0, "{due_h} {h2}");
+}
+
+#[test]
+fn section_rows_follow_the_default_order_and_the_sort() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        d.sections[0].tests = vec![TestSystem {
+            id: "t-cobas".into(),
+            name: "Cobas".into(),
+            order: 0,
+            retired: false,
+            rule_id: None,
+        }];
+        for (id, name) in [("p-a", "Amy"), ("p-b", "Bo"), ("p-c", "Cy"), ("p-z", "Al")] {
+            d.staff.push(staff(id, name, "MLT", "t-cobas"));
+        }
+        d.records.push(initial("p-b", "t-cobas", 300));
+        // As in the workbook; Al was added in the app.
+        d.sections[0].staff_order = vec!["p-c".into(), "p-a".into(), "p-b".into()];
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    button(&h, "Sections").click();
+    h.run();
+    let order = |h: &Harness<'static, TrackerApp>| {
+        let mut v: Vec<(f32, &str)> = ["Amy", "Bo", "Cy", "Al"]
+            .into_iter()
+            .map(|n| {
+                let cell = format!("{n} \u{b7} Cobas");
+                (h.get_by_label(&cell).rect().top(), n)
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v.into_iter().map(|(_, n)| n).collect::<Vec<_>>()
+    };
+    let pick = |h: &mut Harness<'static, TrackerApp>, label: &str| {
+        h.get_by_label_contains("Sort: ").click();
+        h.run();
+        button(h, label).click();
+        h.run();
+    };
+    assert_eq!(order(&h), ["Cy", "Amy", "Bo", "Al"]);
+    pick(&mut h, "Name A\u{2013}Z");
+    assert_eq!(order(&h), ["Al", "Amy", "Bo", "Cy"]);
+    pick(&mut h, "Name Z\u{2013}A");
+    assert_eq!(order(&h), ["Cy", "Bo", "Amy", "Al"]);
+    pick(&mut h, "Due date");
+    assert_eq!(order(&h)[0], "Bo");
+    // A column sorts too; picking an order undoes that.
+    button(&h, "Cobas").click();
+    h.run();
+    pick(&mut h, "Default order");
+    assert_eq!(order(&h), ["Cy", "Amy", "Bo", "Al"]);
+}
+
+#[test]
+fn back_and_forward_retrace_the_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    let back = |h: &mut Harness<'static, TrackerApp>| {
+        button(h, "Back").click();
+        h.run();
+    };
+    // Nowhere to go yet.
+    back(&mut h);
+    h.get_by_label("Staff 2");
+    button(&h, "Open Chemistry in Sections").click();
+    h.run();
+    button(&h, "Haematology").click();
+    h.run();
+    button(&h, "Settings").click();
+    h.run();
+    back(&mut h);
+    h.get_by_label("No test systems"); // Haematology has none
+    back(&mut h);
+    h.get_by_label("Agnes \u{b7} Cobas");
+    back(&mut h);
+    h.get_by_label("Staff 2");
+    button(&h, "Forward").click();
+    h.run();
+    h.get_by_label("Agnes \u{b7} Cobas");
+    // The keyboard does the same.
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowRight);
+    h.run();
+    h.get_by_label("No test systems");
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+    h.run();
+    // Back also closes the panel it opened after.
+    h.get_by_label("Agnes \u{b7} Cobas").click();
+    h.run();
+    h.get_by_label("Close panel");
+    back(&mut h);
+    assert!(h.query_by_label("Close panel").is_none());
+    h.get_by_label("Agnes \u{b7} Cobas");
+    // Going somewhere new drops what was ahead.
+    button(&h, "Personnel").click();
+    h.run();
+    button(&h, "Forward").click();
+    h.run();
+    assert!(h.query_by_label("No test systems").is_none());
+    assert!(h.query_by_label("Close panel").is_none());
+}
+
+#[test]
+fn search_is_centred_and_the_name_is_on_the_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = seeded(&dir, 30);
+    let name = h.get_by_label("Competency Tracker").rect();
+    let forward = button(&h, "Forward").rect();
+    assert!(forward.right() <= name.left() && name.right() < 640.0);
+}
+
+#[test]
+fn summary_section_button_opens_the_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    button(&h, "Open Chemistry in Sections").click();
+    h.run();
+    h.get_by_label("Agnes \u{b7} Cobas");
+    h.get_by_label_contains("Sort: ");
+    assert!(
+        h.query_by_label("Clear filters").is_none(),
+        "the row underneath wasn't clicked"
+    );
 }
 
 #[test]

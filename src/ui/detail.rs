@@ -1,5 +1,6 @@
 //! Competency detail panel: one person and one test system. Header with the
-//! next-due pill, the actions (edit mode only), and the history, newest first.
+//! next-due pill, the actions (edit mode only), and the history, which reads
+//! from the oldest entry at the top down to the latest.
 
 use std::collections::HashSet;
 
@@ -60,6 +61,9 @@ pub(crate) struct DetailState {
     pub expanded: bool,
     /// History entries opened to show who recorded them, comments and actions.
     open_entries: HashSet<Id>,
+    /// An entry just opened (or whose form just did): scrolled into view once
+    /// it's drawn, as the latest entries sit at the bottom of the panel.
+    reveal: Option<Id>,
     pub form: DetailForm,
     /// The (staff, test) this state belongs to; a new target resets it.
     target: Option<(Id, Id)>,
@@ -590,7 +594,7 @@ fn by_line(ui: &mut egui::Ui, pal: &Palette, by: &str, at: Ts) {
     ui.label(RichText::new(text).size(12.5).color(pal.muted));
 }
 
-/// The visible entries and the "Show N older entries" link.
+/// The "Show N older entries" link, then the visible entries, oldest first.
 fn history_list(
     ui: &mut egui::Ui,
     v: &View,
@@ -604,10 +608,18 @@ fn history_list(
     }
     let mut op = None;
     let (shown, hidden) = split_history(entries, state.expanded);
+    if hidden > 0 {
+        let s = if hidden == 1 { "entry" } else { "entries" };
+        if ui.link(format!("Show {hidden} older {s}")).clicked() {
+            state.expanded = true;
+        }
+    } else if state.expanded && entries.len() > HISTORY_DEFAULT && ui.link("Show fewer").clicked() {
+        state.expanded = false;
+    }
     // The rail joining the entries' dots, drawn behind them once they're placed.
     let rail = ui.painter().add(egui::Shape::Noop);
     let mut dots = Vec::with_capacity(shown.len());
-    for e in shown {
+    for e in shown.iter().rev() {
         ui.add_space(4.0);
         let (dot, o) = entry(ui, v, state, e, pair);
         dots.push(dot);
@@ -616,24 +628,15 @@ fn history_list(
         }
     }
     if let (Some(first), Some(last)) = (dots.first(), dots.last()) {
-        // Older entries continue below: the rail runs on, fading out.
-        let end = if hidden > 0 { last.y + 22.0 } else { last.y };
+        // Older entries come before these: the rail starts a little above.
+        let start = if hidden > 0 { first.y - 18.0 } else { first.y };
         ui.painter().set(
             rail,
             egui::Shape::line_segment(
-                [*first, Pos2::new(first.x, end)],
+                [Pos2::new(first.x, start), *last],
                 Stroke::new(2.0, v.pal.border),
             ),
         );
-    }
-    ui.add_space(6.0);
-    if hidden > 0 {
-        let s = if hidden == 1 { "entry" } else { "entries" };
-        if ui.link(format!("Show {hidden} older {s}")).clicked() {
-            state.expanded = true;
-        }
-    } else if state.expanded && entries.len() > HISTORY_DEFAULT && ui.link("Show fewer").clicked() {
-        state.expanded = false;
     }
     op
 }
@@ -750,8 +753,18 @@ fn entry(
             }
         });
     });
+    if open && state.reveal.as_ref() == Some(&id) {
+        state.reveal = None;
+        let rect = egui::Rect::from_min_max(
+            Pos2::new(ui.max_rect().left(), row_top),
+            Pos2::new(ui.max_rect().right(), ui.min_rect().bottom()),
+        );
+        ui.scroll_to_rect(rect, None);
+    }
     if toggle && !state.open_entries.remove(&id) {
+        state.reveal = Some(id.clone());
         state.open_entries.insert(id);
+        ui.ctx().request_repaint();
     }
     let dot = Pos2::new(ui.max_rect().left() + 8.0, row_top + 16.0);
     let p = ui.painter();
@@ -817,6 +830,8 @@ fn details(
                                     comment: r.comment.clone(),
                                 };
                                 state.error = None;
+                                state.reveal = Some(r.id.clone());
+                                ui.ctx().request_repaint();
                             }
                             let delete = Button::new(
                                 RichText::new(format!("{}  Delete", icon::TRASH)).color(pal.red_fg),

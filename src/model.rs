@@ -102,6 +102,10 @@ pub struct Section {
     /// `"#RRGGBB"`; `None` uses the default colour for the section's position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Staff ids in the order the workbook lists them: the section's default
+    /// order. Anyone not listed comes after, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub staff_order: Vec<Id>,
 }
 
 /// The colours sections get by position until one is picked in Settings.
@@ -291,6 +295,7 @@ impl Data {
             retired: false,
             tests: vec![],
             color: None,
+            staff_order: vec![],
         })
         .collect();
         Data {

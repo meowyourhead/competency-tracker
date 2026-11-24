@@ -879,6 +879,43 @@ pub fn icon_button(ui: &mut Ui, pal: &Palette, glyph: &str, label: &str) -> egui
     resp.on_hover_text(label)
 }
 
+/// A back / forward button; faint and inert when there's nowhere to go.
+pub fn nav_button(
+    ui: &mut Ui,
+    pal: &Palette,
+    glyph: &str,
+    label: &str,
+    tip: &str,
+    enabled: bool,
+) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(32.0), sense);
+    if ui.is_rect_visible(rect) {
+        if enabled && resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(8), pal.border);
+        }
+        let color = if enabled {
+            pal.text
+        } else {
+            pal.muted.gamma_multiply(0.4)
+        };
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(18.0),
+            color,
+        );
+    }
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+    resp.on_hover_text(tip)
+}
+
 /// A sidebar navigation row; the active row gets an accent-tinted background.
 /// When `compact`, only the icon is drawn (the label stays the accessible name).
 pub fn nav_item(

@@ -26,6 +26,7 @@ use crate::ui::sections::{self, SectionsState};
 use crate::ui::settings::{self, SettingsState};
 use crate::ui::summary::{self, SummaryState};
 use crate::ui::theme::{self, serif, Palette};
+use crate::ui::widgets::nav_button;
 use crate::ui::widgets::{choice, icon_button, nav_item, presence, search_box, window_button};
 use crate::update::{relaunch, UpdateState, Updater};
 
@@ -41,6 +42,8 @@ const DETAIL_MIN_W: f32 = 380.0;
 const DETAIL_MAX_W: f32 = 620.0;
 /// The page's side margin; the title bar's search starts at the same line.
 const PAGE_MARGIN: i8 = 40;
+/// The sidebar with its labels: wide enough for the longest, and no wider.
+const SIDEBAR_W: f32 = 148.0;
 /// The widest the title bar's search gets.
 const TITLE_SEARCH_W: f32 = 260.0;
 
@@ -209,8 +212,80 @@ pub(crate) struct Ctx<'a> {
     pub profile_view: &'a mut ProfileView,
     /// Set to a person's id to open their profile on the Personnel page.
     pub open_profile: &'a mut Option<Id>,
+    /// Set to a section's id to open it on the Sections page.
+    pub open_section: &'a mut Option<Id>,
     /// Checks for and installs new versions (Settings → General).
     pub updater: &'a mut Updater,
+}
+
+/// Somewhere Back and Forward can return to.
+#[derive(Debug, Clone, PartialEq)]
+struct Place {
+    page: Page,
+    all_sections: bool,
+    section: Option<Id>,
+    profile: Option<Id>,
+    settings: Option<settings::SettingsTab>,
+    detail: Option<(Id, Id)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Back,
+    Forward,
+}
+
+/// How many places Back remembers.
+const HISTORY_MAX: usize = 100;
+
+/// The places visited, as in a web browser.
+#[derive(Default)]
+struct History {
+    back: Vec<Place>,
+    forward: Vec<Place>,
+    current: Option<Place>,
+}
+
+impl History {
+    /// Notes where the app is at the end of a frame.
+    fn visit(&mut self, p: Place) {
+        match &self.current {
+            Some(c) if *c == p => return,
+            Some(c) => {
+                self.back.push(c.clone());
+                if self.back.len() > HISTORY_MAX {
+                    self.back.remove(0);
+                }
+                self.forward.clear();
+            }
+            None => {}
+        }
+        self.current = Some(p);
+    }
+
+    fn can(&self, s: Step) -> bool {
+        match s {
+            Step::Back => !self.back.is_empty(),
+            Step::Forward => !self.forward.is_empty(),
+        }
+    }
+
+    /// Moves one step from `here`; returns the place to show.
+    fn step(&mut self, s: Step, here: &Place) -> Option<Place> {
+        let (from, to) = match s {
+            Step::Back => (&mut self.back, &mut self.forward),
+            Step::Forward => (&mut self.forward, &mut self.back),
+        };
+        let p = from.pop()?;
+        to.push(here.clone());
+        self.current = Some(p.clone());
+        Some(p)
+    }
+
+    /// The place stepped to settled as `p` (say, what it showed is gone).
+    fn settle(&mut self, p: Place) {
+        self.current = Some(p);
+    }
 }
 
 pub struct TrackerApp {
@@ -229,6 +304,9 @@ pub struct TrackerApp {
     attention: bool,
     search: String,
     open_detail: Option<(Id, Id)>,
+    history: History,
+    /// Back or Forward was clicked this frame.
+    step: Option<Step>,
     /// The close was cleared (saved, or the user chose to quit anyway).
     allow_close: bool,
     /// When "Updated with the latest changes" was last shown.
@@ -276,6 +354,8 @@ impl TrackerApp {
             attention: false,
             search: String::new(),
             open_detail: None,
+            history: History::default(),
+            step: None,
             allow_close: false,
             last_reload_toast: None,
             summary: SummaryState::default(),
@@ -374,12 +454,20 @@ impl TrackerApp {
             self.modal.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K));
         let pal = theme::palette(self.prefs.theme);
 
+        let here = self.history.current.clone();
+        self.take_step(&ctx);
+        let stepped = self.history.current != here;
+
         // The window's width in points: at a large display scale on a small
         // screen the sidebar folds to icons (it can still be opened for a
         // while) and the detail panel narrows, so the page keeps its room.
         let total_w = ui.max_rect().width();
         self.narrow = total_w < NARROW_W;
-        let width = if self.compact_sidebar() { 60.0 } else { 264.0 };
+        let width = if self.compact_sidebar() {
+            60.0
+        } else {
+            SIDEBAR_W
+        };
         let detail_w = ((total_w - width) * 0.5).clamp(DETAIL_MIN_W, DETAIL_MAX_W);
         let scale_before = self.prefs.display_scale;
         let view_before = self.prefs.profile_view;
@@ -408,6 +496,7 @@ impl TrackerApp {
         overlays::banner(ui, &pal, &self.session);
         let today = now.date_naive();
         let mut open_profile = None;
+        let mut open_section = None;
         // Drawn on every page whenever a detail target is open; slides in and out.
         let mut detail_open = self.open_detail.is_some();
         Panel::right("detail")
@@ -430,6 +519,7 @@ impl TrackerApp {
                     display_scale: &mut self.prefs.display_scale,
                     profile_view: &mut self.prefs.profile_view,
                     open_profile: &mut open_profile,
+                    open_section: &mut open_section,
                     updater: &mut self.updater,
                 };
                 detail::show(ui, &mut cx, &mut self.detail);
@@ -453,6 +543,7 @@ impl TrackerApp {
                         display_scale: &mut self.prefs.display_scale,
                         profile_view: &mut self.prefs.profile_view,
                         open_profile: &mut open_profile,
+                        open_section: &mut open_section,
                         updater: &mut self.updater,
                     };
                     match self.page {
@@ -468,9 +559,23 @@ impl TrackerApp {
             self.personnel.profile = Some(id);
             self.page = Page::Personnel;
         }
+        if let Some(id) = open_section {
+            // The whole section: filters left over from an earlier visit go.
+            self.sections.clear_filters();
+            self.navigate(SearchHit::Section(id));
+        }
         if self.open_detail.is_none() {
             // Reopening the same pair later starts fresh.
             self.detail = DetailState::default();
+        }
+        let place = self.place();
+        if stepped {
+            self.history.settle(place);
+        } else {
+            self.history.visit(place);
+        }
+        if self.step.is_some() {
+            ctx.request_repaint();
         }
         if self.prefs.display_scale != scale_before {
             // Takes effect from the next frame, laid out afresh at the new size.
@@ -701,8 +806,80 @@ impl TrackerApp {
         }
     }
 
-    /// The draggable strip at the top (double-click maximises): the search
-    /// on the left, the app's name in the middle of the window, and the
+    /// Where the app is now, for Back and Forward.
+    fn place(&self) -> Place {
+        let sections = self.page == Page::Sections;
+        Place {
+            page: self.page,
+            all_sections: sections && self.sections.all,
+            section: self
+                .sections
+                .section
+                .clone()
+                .filter(|_| sections && !self.sections.all),
+            profile: self
+                .personnel
+                .profile
+                .clone()
+                .filter(|_| self.page == Page::Personnel),
+            settings: (self.page == Page::Settings).then_some(self.settings.tab),
+            detail: self.open_detail.clone(),
+        }
+    }
+
+    /// Goes to a place visited before. People and tests deleted since are
+    /// skipped over by the pages themselves.
+    fn go_to(&mut self, p: Place) {
+        self.page = p.page;
+        match p.page {
+            Page::Sections => {
+                self.sections.all = p.all_sections;
+                if p.section.is_some() && p.section != self.sections.section {
+                    self.sections.section = p.section;
+                    self.sections.test = None;
+                }
+            }
+            Page::Personnel => self.personnel.profile = p.profile,
+            Page::Settings => {
+                if let Some(t) = p.settings {
+                    self.settings.tab = t;
+                }
+            }
+            Page::Summary | Page::Audit => {}
+        }
+        let data = self.session.data();
+        self.open_detail = p
+            .detail
+            .filter(|(s, t)| data.staff(s).is_some() && data.test(t).is_some());
+    }
+
+    /// Back or Forward: the buttons, Alt+Left / Alt+Right, or the mouse's
+    /// side buttons. Not while a dialog is open.
+    fn take_step(&mut self, ctx: &egui::Context) {
+        let mut step = self.step.take();
+        let dialog = self.modal.is_some() || ctx.memory(|m| m.top_modal_layer().is_some());
+        if dialog {
+            return;
+        }
+        ctx.input_mut(|i| {
+            if i.consume_key(Modifiers::ALT, Key::ArrowLeft)
+                || i.pointer.button_pressed(egui::PointerButton::Extra1)
+            {
+                step = Some(Step::Back);
+            } else if i.consume_key(Modifiers::ALT, Key::ArrowRight)
+                || i.pointer.button_pressed(egui::PointerButton::Extra2)
+            {
+                step = Some(Step::Forward);
+            }
+        });
+        if let Some(p) = step.and_then(|s| self.history.step(s, &self.place())) {
+            self.go_to(p);
+            ctx.request_repaint();
+        }
+    }
+
+    /// The draggable strip at the top (double-click maximises): back, forward
+    /// and the app's name on the left, the search in the middle, and the
     /// presence capsule, theme switch and window buttons on the right.
     fn title_bar(
         &mut self,
@@ -719,14 +896,67 @@ impl TrackerApp {
         let (clicks, controls_left) =
             title_bar_controls(ui, pal, &user, editing, can_toggle, self.prefs.theme);
 
-        // The search lines up with the page below it, as wide as there's room for.
-        let left = rect.left() + PAGE_MARGIN as f32;
-        let search_w = (controls_left - 16.0 - left).min(TITLE_SEARCH_W);
-        let mut free_from = left;
+        // Back and forward, then the app's name, lined up with the page below.
+        let left = rect.left() + PAGE_MARGIN as f32 - 8.0;
+        let nav = egui::Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2(left + 68.0, rect.bottom()),
+        );
+        let builder = egui::UiBuilder::new()
+            .max_rect(nav)
+            .layout(Layout::left_to_right(Align::Center));
+        ui.scope_builder(builder, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (dir, glyph, label) in [
+                (Step::Back, icon::ARROW_LEFT, "Back"),
+                (Step::Forward, icon::ARROW_RIGHT, "Forward"),
+            ] {
+                let on = self.history.can(dir);
+                let tip = if dir == Step::Back {
+                    "Back (Alt+Left)"
+                } else {
+                    "Forward (Alt+Right)"
+                };
+                if nav_button(ui, pal, glyph, label, tip, on).clicked() {
+                    self.step = Some(dir);
+                }
+            }
+        });
+        let mut free_from = nav.right();
+
+        // The search sits at the window's centre, or as near as the rest
+        // allows, shrinking (and then going) when there's little room.
+        let name_w = ui
+            .painter()
+            .layout_no_wrap(
+                "Competency Tracker".to_owned(),
+                egui::FontId::new(17.0, serif()),
+                pal.text,
+            )
+            .size();
+        // The name gives way to the search when there's no room for both.
+        let name_at = free_from + 12.0;
+        if controls_left - 16.0 - (name_at + name_w.x + 20.0) >= 120.0 {
+            let at = egui::Rect::from_min_size(
+                egui::pos2(name_at, rect.center().y - name_w.y / 2.0),
+                name_w,
+            );
+            let name = RichText::new("Competency Tracker")
+                .family(serif())
+                .size(17.0)
+                .color(pal.text);
+            // Hover-only, so the strip under it still drags the window.
+            ui.put(at, egui::Label::new(name).selectable(false));
+            free_from = at.right();
+        }
+        let lo = free_from + 20.0;
+        let search_w = (controls_left - 16.0 - lo).min(TITLE_SEARCH_W);
         if search_w >= 120.0 {
+            let centre = ui.ctx().input(|i| i.viewport_rect()).center().x;
+            let x = (centre - search_w / 2.0).clamp(lo, controls_left - 16.0 - search_w);
             let area = egui::Rect::from_min_max(
-                egui::pos2(left, rect.top()),
-                egui::pos2(left + search_w, rect.bottom()),
+                egui::pos2(x, rect.top()),
+                egui::pos2(x + search_w, rect.bottom()),
             );
             let builder = egui::UiBuilder::new()
                 .max_rect(area)
@@ -735,28 +965,6 @@ impl TrackerApp {
             ui.scope_builder(builder, |ui| {
                 self.search_field(ui, search_w - 20.0, focus_search)
             });
-            free_from = area.right();
-        }
-
-        // The name sits at the window's centre, or as near as the search
-        // and the controls allow; it gives way when there's no room.
-        let name = RichText::new("Competency Tracker")
-            .family(serif())
-            .size(17.0)
-            .color(pal.text);
-        let galley = ui.painter().layout_no_wrap(
-            "Competency Tracker".to_owned(),
-            egui::FontId::new(17.0, serif()),
-            pal.text,
-        );
-        let size = galley.size();
-        let (lo, hi) = (free_from + 20.0, controls_left - 20.0 - size.x);
-        if hi >= lo {
-            let centre = ui.ctx().input(|i| i.viewport_rect()).center().x;
-            let x = (centre - size.x / 2.0).clamp(lo, hi);
-            let at = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - size.y / 2.0), size);
-            // Hover-only, so the strip under it still drags the window.
-            ui.put(at, egui::Label::new(name).selectable(false));
         }
         clicks
     }

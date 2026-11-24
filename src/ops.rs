@@ -473,6 +473,9 @@ pub fn delete_staff_permanently(d: &mut Data, a: &Actor, id: &str, confirm_text:
     d.due_overrides.retain(|r| r.staff_id != id);
     d.delay_notes.retain(|r| r.staff_id != id);
     d.notes.retain(|r| r.staff_id != id);
+    for s in &mut d.sections {
+        s.staff_order.retain(|x| x != id);
+    }
     log(
         d,
         a,
@@ -592,6 +595,15 @@ pub fn merge_staff(d: &mut Data, a: &Actor, keep_id: &str, merge_id: &str) -> Re
         }
     }
     d.staff.retain(|s| s.id != merge_id);
+    // In each section's order the kept person takes the merged one's place,
+    // unless they already have their own.
+    for s in &mut d.sections {
+        if s.staff_order.iter().any(|x| x == keep_id) {
+            s.staff_order.retain(|x| x != merge_id);
+        } else if let Some(x) = s.staff_order.iter_mut().find(|x| *x == merge_id) {
+            *x = keep_id.to_owned();
+        }
+    }
     let records = if moved == 1 {
         "1 completion".to_owned()
     } else {
@@ -714,6 +726,7 @@ pub fn add_section(d: &mut Data, a: &Actor, name: &str) -> Res<Id> {
         retired: false,
         tests: vec![],
         color: None,
+        staff_order: vec![],
     });
     log(
         d,

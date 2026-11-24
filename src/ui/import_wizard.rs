@@ -1,6 +1,7 @@
 //! Excel import wizard: choose the workbook, review which names are the same
-//! person (`import_review.rs`), preview the counts, import, done. The wizard
-//! replaces all data, so the import button needs edit mode.
+//! person (`import_review.rs`), preview the changes, import, done. Where there
+//! is data already, the workbook either updates it (the default: nothing done
+//! in the app is lost) or replaces it. Importing needs edit mode.
 
 use std::path::PathBuf;
 
@@ -10,9 +11,19 @@ use crate::import::excel::{read_workbook, RawSheet};
 use crate::import::mapping::{
     build_import, carry_over, propose_merges, ImportOptions, ImportPlan, MergeGroup,
 };
+use crate::import::update::{update_existing, UpdateReport};
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::import_review;
 use crate::ui::theme::{heading, medium, Palette};
+use crate::ui::widgets::segmented;
+
+/// What the workbook does to the data already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Mode {
+    #[default]
+    Update,
+    Replace,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum WizardStep {
@@ -38,13 +49,16 @@ pub(crate) struct ImportWizard {
     sheets: Vec<RawSheet>,
     groups: Vec<MergeGroup>,
     plan: Option<ImportPlan>,
+    mode: Mode,
+    /// What updating would change, for a data revision.
+    changes: Option<(u64, UpdateReport)>,
+    /// "Imported 43 staff…" / "Updated…", shown on the Done step.
+    summary: String,
     error: Option<String>,
     /// The chosen workbook.
     path: Option<PathBuf>,
     /// A workbook waiting to be read, and whether "Reading…" has been drawn yet.
     reading: Option<(PathBuf, bool)>,
-    /// What the import did: `(staff, records, unconfirmed)`.
-    done: Option<(usize, usize, usize)>,
     /// Set once `import-report.txt` was written.
     report_path: Option<PathBuf>,
     /// The report's warnings, shown on the Done step.
@@ -84,16 +98,49 @@ impl ImportWizard {
             tolerance_days: cx.session.data().settings.variance_tolerance_days,
         };
         self.plan = Some(build_import(&self.sheets, &self.groups, &opts));
+        self.changes = None;
         self.error = None;
         self.step = WizardStep::Preview;
     }
 
+    /// What updating the current data would change.
+    fn refresh_changes(&mut self, cx: &Ctx) {
+        let rev = cx.session.revision();
+        if matches!(&self.changes, Some((r, _)) if *r == rev) {
+            return;
+        }
+        if let Some(plan) = &self.plan {
+            let (_, report) = update_existing(cx.session.data(), plan, cx.session.user(), cx.now);
+            self.changes = Some((rev, report));
+        }
+    }
+
     fn run_import(&mut self, cx: &mut Ctx) {
         let Some(plan) = &self.plan else { return };
-        // Settings, the default rule and the audit history survive a re-import.
-        let mut data = plan.data.clone();
-        let mut report = plan.report.clone();
-        carry_over(&mut data, &mut report, cx.session.data());
+        let (data, text, summary, warnings) = if has_data(cx) && self.mode == Mode::Update {
+            let (data, r) = update_existing(cx.session.data(), plan, cx.session.user(), cx.now);
+            let summary = if r.is_empty() {
+                "Everything was already up to date.".to_owned()
+            } else {
+                format!(
+                    "Updated: {} completions added, {} confirmed, {} dates corrected.",
+                    r.added.len(),
+                    r.confirmed.len(),
+                    r.changed.len()
+                )
+            };
+            (data, r.to_text(), summary, Vec::new())
+        } else {
+            // Settings, the default rule and the audit history survive a re-import.
+            let mut data = plan.data.clone();
+            let mut report = plan.report.clone();
+            carry_over(&mut data, &mut report, cx.session.data());
+            let summary = format!(
+                "Imported {} staff and {} records.",
+                report.staff, report.records
+            );
+            (data, report.to_text(), summary, report.warnings)
+        };
         // `Ok` means replaced: a failed save is retried by the session and
         // shown on the Done step, so the import is never run twice.
         if let Err(e) = cx.session.replace_data(cx.now, data) {
@@ -105,17 +152,22 @@ impl ImportWizard {
             return;
         }
         let path = cx.session.data_dir().import_report();
-        match std::fs::write(&path, report.to_text()) {
+        match std::fs::write(&path, text) {
             Ok(()) => self.report_path = Some(path),
             Err(e) => cx
                 .toasts
                 .push(Toast::new(format!("Couldn't write the import report: {e}"))),
         }
-        self.done = Some((report.staff, report.records, report.unconfirmed));
-        self.warnings = report.warnings;
+        self.summary = summary;
+        self.warnings = warnings;
         self.error = None;
         self.step = WizardStep::Done;
     }
+}
+
+fn has_data(cx: &Ctx) -> bool {
+    let data = cx.session.data();
+    !data.staff.is_empty() || !data.records.is_empty()
 }
 
 /// Draws the wizard. Returns true when the user asked to review the unconfirmed records.
@@ -247,13 +299,34 @@ fn count_row(ui: &mut egui::Ui, pal: &Palette, label: &str, n: usize) {
 
 fn preview(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) {
     let pal = cx.pal;
-    let Some(plan) = &w.plan else {
+    if w.plan.is_none() {
         w.step = WizardStep::ReviewMerges;
         return;
-    };
-    let r = &plan.report;
-    let data = cx.session.data();
-    if !data.staff.is_empty() || !data.records.is_empty() {
+    }
+    let existing = has_data(cx);
+    if existing {
+        let at = usize::from(w.mode == Mode::Replace);
+        if let Some(i) = segmented(
+            ui,
+            pal,
+            at,
+            &["Update existing records", "Replace everything"],
+        ) {
+            w.mode = if i == 0 { Mode::Update } else { Mode::Replace };
+        }
+        ui.add_space(8.0);
+        if w.mode == Mode::Update {
+            w.refresh_changes(cx);
+        }
+    }
+    let updating = existing && w.mode == Mode::Update;
+    if updating {
+        ui.label(
+            RichText::new("Adds what's new in the workbook and keeps everything done in the app: removed and merged staff, assignments, edited entries and due dates. A backup is saved first to the snapshots\\archive folder.")
+                .color(pal.muted),
+        );
+        ui.add_space(10.0);
+    } else if existing {
         Frame::new().fill(pal.yellow_bg).corner_radius(8).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
             ui.label(
                 RichText::new("This replaces the current data. A backup of it is saved first to the snapshots\\archive folder.")
@@ -262,46 +335,52 @@ fn preview(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) {
         });
         ui.add_space(10.0);
     }
-    card(ui, pal, |ui| {
-        ui.label(
-            RichText::new("What will be imported")
-                .family(medium())
-                .size(15.5)
-                .color(pal.text),
-        );
-        ui.add_space(6.0);
-        egui::Grid::new("import_counts")
-            .num_columns(2)
-            .spacing([24.0, 6.0])
-            .show(ui, |ui| {
-                count_row(ui, pal, "Staff", r.staff);
-                count_row(ui, pal, "Records", r.records);
-                count_row(ui, pal, "Unconfirmed records", r.unconfirmed);
-                count_row(ui, pal, "Planned dates", r.planned);
-                count_row(ui, pal, "Notes", r.notes);
-                count_row(ui, pal, "Excel due dates used", r.excel_overrides.len());
-                count_row(
-                    ui,
-                    pal,
-                    "Excel due dates ignored",
-                    r.excel_ignored_planned.len() + r.excel_ignored_years.len(),
-                );
-                count_row(ui, pal, "Annual numbering to check", r.flagged_stage.len());
-            });
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("The full list is saved as import-report.txt in the data folder.")
-                .color(pal.muted),
-        );
-        error_line(ui, pal, &w.error);
-    });
+    if let (true, Some((_, r))) = (updating, &w.changes) {
+        card(ui, pal, |ui| changes(ui, pal, r, &w.error));
+    } else if let Some(plan) = &w.plan {
+        let r = &plan.report;
+        card(ui, pal, |ui| {
+            ui.label(
+                RichText::new("What will be imported")
+                    .family(medium())
+                    .size(15.5)
+                    .color(pal.text),
+            );
+            ui.add_space(6.0);
+            egui::Grid::new("import_counts")
+                .num_columns(2)
+                .spacing([24.0, 6.0])
+                .show(ui, |ui| {
+                    count_row(ui, pal, "Staff", r.staff);
+                    count_row(ui, pal, "Records", r.records);
+                    count_row(ui, pal, "Unconfirmed records", r.unconfirmed);
+                    count_row(ui, pal, "Planned dates", r.planned);
+                    count_row(ui, pal, "Notes", r.notes);
+                    count_row(ui, pal, "Excel due dates used", r.excel_overrides.len());
+                    count_row(
+                        ui,
+                        pal,
+                        "Excel due dates ignored",
+                        r.excel_ignored_planned.len() + r.excel_ignored_years.len(),
+                    );
+                    count_row(ui, pal, "Annual numbering to check", r.flagged_stage.len());
+                });
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("The full list is saved as import-report.txt in the data folder.")
+                    .color(pal.muted),
+            );
+            error_line(ui, pal, &w.error);
+        });
+    }
     let editing = cx.session.is_editing();
     ui.horizontal(|ui| {
         if ui.button("Back").clicked() {
             w.plan = None;
             w.step = WizardStep::ReviewMerges;
         }
-        if ui.add_enabled(editing, Button::new("Import")).clicked() {
+        let go = if updating { "Update" } else { "Import" };
+        if ui.add_enabled(editing, Button::new(go)).clicked() {
             w.run_import(cx);
         }
         if !editing {
@@ -310,14 +389,64 @@ fn preview(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) {
     });
 }
 
+/// What updating will change: the counts, and every line of each list.
+fn changes(ui: &mut egui::Ui, pal: &Palette, r: &UpdateReport, error: &Option<String>) {
+    ui.label(
+        RichText::new("What will change")
+            .family(medium())
+            .size(15.5)
+            .color(pal.text),
+    );
+    ui.add_space(6.0);
+    if r.is_empty() {
+        ui.label(RichText::new("Nothing: everything is already up to date.").color(pal.muted));
+    }
+    let lists = [
+        ("Completions added", &r.added),
+        ("Completions confirmed", &r.confirmed),
+        ("Completion dates corrected", &r.changed),
+        ("Due, not done (no longer to review)", &r.not_done),
+        ("New staff", &r.new_staff),
+        ("New test systems", &r.new_tests),
+        ("Newly assigned", &r.assigned),
+        ("Due dates from Excel", &r.due_dates),
+        ("Kept as they are in the app", &r.kept),
+        ("No longer in Excel (left as they are)", &r.stale),
+    ];
+    for (title, items) in lists {
+        if items.is_empty() {
+            continue;
+        }
+        egui::CollapsingHeader::new(format!("{title} ({})", items.len()))
+            .id_salt(title)
+            .show(ui, |ui| {
+                for i in items {
+                    ui.label(RichText::new(i).size(13.0).color(pal.muted));
+                }
+            });
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("Each section's default order follows the workbook's order of names. The full list is saved as import-report.txt in the data folder.")
+            .color(pal.muted),
+    );
+    error_line(ui, pal, error);
+}
+
 /// Returns true for "Review unconfirmed".
 fn done(ui: &mut egui::Ui, cx: &mut Ctx, w: &mut ImportWizard) -> bool {
     let pal = cx.pal;
-    let (staff, records, unconfirmed) = w.done.unwrap_or_default();
+    let unconfirmed = cx
+        .session
+        .data()
+        .records
+        .iter()
+        .filter(|r| r.unconfirmed)
+        .count();
     let mut review = false;
     card(ui, pal, |ui| {
         ui.label(
-            RichText::new(format!("Imported {staff} staff and {records} records."))
+            RichText::new(&w.summary)
                 .family(medium())
                 .size(15.5)
                 .color(pal.text),
@@ -389,6 +518,7 @@ mod tests {
             vec![StageCell {
                 cell: Cell::Empty,
                 ticked: false,
+                due: false,
             }]
         };
         RawSheet {
@@ -408,6 +538,7 @@ mod tests {
                     vec![StageCell {
                         cell: Cell::Date(ymd(2025, 1, 10)),
                         ticked: true,
+                        due: false,
                     }],
                     empty(),
                     empty(),
@@ -454,6 +585,7 @@ mod tests {
                         display_scale: &mut 1.0,
                         profile_view: &mut Default::default(),
                         open_profile: &mut None,
+                        open_section: &mut None,
                         updater: &mut Default::default(),
                     };
                     if show(ui, &mut cx, &mut st.wizard) {
@@ -663,6 +795,8 @@ mod tests {
         h.run();
         button(&h, "Next").click();
         h.run();
+        button(&h, "Replace everything").click();
+        h.run();
         h.get_by_label_contains("A backup of it is saved first");
         button(&h, "Import").click();
         h.run();
@@ -685,6 +819,38 @@ mod tests {
             1,
             "the first import was backed up"
         );
+    }
+
+    #[test]
+    fn updating_keeps_what_is_there_and_adds_what_is_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(&dir);
+        h.state_mut()
+            .wizard
+            .load_sheets(vec![sheet("Hematology", "Xin Yi", "MT")]);
+        h.run();
+        import_now(&mut h);
+        let id = h.state().session.data().staff[0].id.clone();
+        h.state_mut().wizard = ImportWizard::default();
+        let mut newer = sheet("Hematology", "Xin Yi", "MT");
+        newer.blocks[0].stages[1][0] = StageCell {
+            cell: Cell::Date(ymd(2025, 7, 10)),
+            ticked: true,
+            due: false,
+        };
+        h.state_mut().wizard.load_sheets(vec![newer]);
+        h.run();
+        button(&h, "Next").click();
+        h.run();
+        h.get_by_label("Completions added (1)");
+        button(&h, "Update").click();
+        h.run();
+        assert_eq!(h.state().wizard.step, WizardStep::Done);
+        h.get_by_label("Updated: 1 completions added, 0 confirmed, 0 dates corrected.");
+        let data = h.state().session.data();
+        assert_eq!(data.staff[0].id, id, "the same person");
+        assert_eq!(data.records.len(), 2);
+        assert_eq!(data.audit.last().unwrap().action, "import.update");
     }
 
     #[test]

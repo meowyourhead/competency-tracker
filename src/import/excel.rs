@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use calamine::{open_workbook_auto, Data, Reader};
 use chrono::NaiveDate;
 
 use crate::dates::{fmt_date, parse_dmy};
+use crate::import::fills::read_due_fills;
 
 pub const SHEETS: [&str; 6] = [
     "Chemistry & Immunology",
@@ -41,6 +43,8 @@ pub struct RawTest {
 pub struct StageCell {
     pub cell: Cell,
     pub ticked: bool,
+    /// Coloured by the workbook's macro: due, not done (unless ticked).
+    pub due: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -204,6 +208,7 @@ pub fn parse_grid(sheet: &str, grid: &[Vec<Cell>]) -> RawSheet {
                     ticked: t
                         .tick_col
                         .is_some_and(|tc| is_text_a(at(grid, row + k, tc))),
+                    due: false,
                 })
                 .collect()
         });
@@ -225,6 +230,19 @@ pub fn parse_grid(sheet: &str, grid: &[Vec<Cell>]) -> RawSheet {
         });
     }
     out
+}
+
+/// Marks the dates whose cell has the macro's colour and no tick.
+fn mark_due(sheet: &mut RawSheet, cells: &HashSet<(usize, usize)>) {
+    for b in &mut sheet.blocks {
+        for (k, row) in b.stages.iter_mut().enumerate() {
+            for (t, c) in sheet.tests.iter().zip(row) {
+                c.due = !c.ticked
+                    && matches!(c.cell, Cell::Date(_))
+                    && cells.contains(&(b.row + k, t.col));
+            }
+        }
+    }
 }
 
 pub fn read_workbook(path: &Path) -> Result<Vec<RawSheet>, ImportError> {
@@ -249,6 +267,12 @@ pub fn read_workbook(path: &Path) -> Result<Vec<RawSheet>, ImportError> {
             grid.push(cells);
         }
         sheets.push(parse_grid(name, &grid));
+    }
+    let fills = read_due_fills(path).map_err(ImportError::Open)?;
+    for s in &mut sheets {
+        if let Some(cells) = fills.get(&s.name) {
+            mark_due(s, cells);
+        }
     }
     Ok(sheets)
 }
@@ -278,7 +302,11 @@ mod tests {
     }
 
     fn stage(cell: Cell, ticked: bool) -> StageCell {
-        StageCell { cell, ticked }
+        StageCell {
+            cell,
+            ticked,
+            due: false,
+        }
     }
 
     // Columns: 0 No, 1 Name, 2 Position, 3 Joined date, 4 Competency Type,
@@ -403,6 +431,18 @@ mod tests {
             b.remarks,
             vec!["needs retrain".to_string(), "second remark".to_string()]
         );
+    }
+
+    #[test]
+    fn coloured_unticked_dates_are_due() {
+        let mut sheet = parse_grid("Serology", &basic_grid());
+        // Initial (ticked), Semi-annual and Next Annual Due under Test A, and
+        // "Not Done" under Test B.
+        let cells = HashSet::from([(3, 5), (4, 5), (6, 5), (3, 7)]);
+        mark_due(&mut sheet, &cells);
+        let due = |k: usize, t: usize| sheet.blocks[0].stages[k][t].due;
+        assert!(due(1, 0) && due(3, 0));
+        assert!(!due(0, 0) && !due(2, 0) && !due(0, 1));
     }
 
     #[test]
