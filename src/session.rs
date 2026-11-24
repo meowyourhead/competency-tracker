@@ -414,9 +414,36 @@ impl Session {
             user: self.me.user.clone(),
             now,
         };
+        let before = self.before();
         let r = f(&mut self.data, &actor);
+        self.record_undo(before, now);
         self.mark_dirty(now);
         Some(r)
+    }
+
+    /// The data as it is (but for its undo steps, which no change touches).
+    fn before(&mut self) -> Data {
+        let undo = std::mem::take(&mut self.data.undo);
+        let before = self.data.clone();
+        self.data.undo = undo;
+        before
+    }
+
+    /// Makes the change since `before` revertible.
+    fn record_undo(&mut self, before: Data, now: Ts) {
+        let user = self.me.user.clone();
+        crate::undo::record(&before, &mut self.data, &user, now);
+    }
+
+    /// Reverts the latest change. Returns what it was. Editing only.
+    pub fn revert_latest(&mut self, now: Ts) -> Result<String, String> {
+        if !self.is_editing() {
+            return Err("Start editing to make changes".into());
+        }
+        let user = self.me.user.clone();
+        let what = crate::undo::revert_latest(&mut self.data, &user, now)?;
+        self.mark_dirty(now);
+        Ok(what)
     }
 
     /// Replaces all data (import) and saves immediately. Editing only.
@@ -438,7 +465,12 @@ impl Session {
                 ));
             }
         }
+        let before = self.before();
+        // Earlier changes can still be reverted, once this one is.
+        let undo = std::mem::take(&mut self.data.undo);
         self.data = data;
+        self.data.undo = undo;
+        self.record_undo(before, now);
         self.mark_dirty(now);
         match self.save_now(now) {
             Err(msg) if !self.is_editing() => Err(msg),
@@ -822,6 +854,7 @@ impl Session {
                 prev.user, prev.machine
             ),
             refs: BTreeMap::new(),
+            reverted: false,
         });
         self.mark_dirty(now);
     }

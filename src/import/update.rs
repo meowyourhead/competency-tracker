@@ -95,7 +95,7 @@ fn between<'a>(s: &'a str, prefix: &str, sep: &str) -> Option<(&'a str, &'a str)
 fn match_staff(data: &Data, plan: &Data) -> HashMap<Id, Option<Id>> {
     let mut former: HashMap<String, Id> = HashMap::new();
     let mut deleted: HashSet<String> = HashSet::new();
-    for e in &data.audit {
+    for e in data.audit.iter().filter(|e| !e.reverted) {
         let old = match e.action.as_str() {
             "staff.merge" => between(&e.detail, "Merged ", " into ").map(|x| x.0),
             "staff.update" => between(&e.detail, "Updated details for ", " (now ").map(|x| x.0),
@@ -146,7 +146,7 @@ fn match_staff(data: &Data, plan: &Data) -> HashMap<Id, Option<Id>> {
 fn renamed(data: &Data, action: &str, prefix: &str, key: &str) -> HashMap<String, Id> {
     data.audit
         .iter()
-        .filter(|e| e.action == action)
+        .filter(|e| e.action == action && !e.reverted)
         .filter_map(|e| {
             let (old, _) = between(&e.detail, prefix, " to ")?;
             Some((normalize_name(old), e.refs.get(key)?.clone()))
@@ -228,13 +228,16 @@ struct Manual {
     /// (staff, section) assigned or unassigned as a whole.
     sections: HashSet<Pair>,
     due: HashSet<Pair>,
+    /// Completions deleted in the app, or turned into due dates (`true`), by
+    /// the end of their audit line ("on 8 Sep 2026").
+    gone: HashSet<(Pair, String, bool)>,
     stages: HashSet<Pair>,
 }
 
 impl Manual {
     fn of(data: &Data) -> Manual {
         let mut m = Manual::default();
-        for e in &data.audit {
+        for e in data.audit.iter().filter(|e| !e.reverted) {
             let Some(staff) = e.refs.get("staff_id") else {
                 continue;
             };
@@ -246,6 +249,12 @@ impl Manual {
                 continue;
             };
             let pair = (staff.clone(), test.clone());
+            if let Some((_, on)) = e.detail.rsplit_once(" on ") {
+                let due = e.action == "record.due";
+                if due || e.action == "record.delete" {
+                    m.gone.insert((pair.clone(), on.to_owned(), due));
+                }
+            }
             match e.action.as_str() {
                 "record.add" | "record.edit" | "record.delete" => m.records.insert(pair),
                 "assignment.set" => m.assignments.insert(pair),
@@ -381,6 +390,25 @@ pub fn update_existing(
             .find(|o| o.staff_id == pair.0 && o.test_id == pair.1)
             .map(|o| o.due_on);
         records.retain(|r| {
+            // Taken out in the app: it stays out, unless it was made a due
+            // date and has been ticked since.
+            let on = fmt_date(r.completed_on);
+            let key = |due| (pair.clone(), on.clone(), due);
+            let here = data.records.iter().any(|x| {
+                x.staff_id == pair.0 && x.test_id == pair.1 && x.completed_on == r.completed_on
+            });
+            if !here
+                && (manual.gone.contains(&key(false))
+                    || r.unconfirmed && manual.gone.contains(&key(true)))
+            {
+                still_planned.insert(pair.clone());
+                report.kept.push(format!(
+                    "{}: {} {on} was taken out in the app",
+                    what(&data, &pair),
+                    r.stage_label
+                ));
+                return false;
+            }
             let missed = r.unconfirmed && planned == Some(r.completed_on);
             if missed {
                 still_planned.insert(pair.clone());
@@ -536,6 +564,7 @@ pub fn update_existing(
             report.due_dates.len()
         ),
         refs: BTreeMap::new(),
+        reverted: false,
     });
     (data, report)
 }
@@ -1084,6 +1113,38 @@ mod tests {
         assert_eq!(o.due_on, ymd(2025, 7, 1));
         let (_, again) = update(&d, &plan);
         assert!(again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn records_taken_out_in_the_app_stay_out() {
+        let mut c = base();
+        c[2] = on(2025, 7, 1, false);
+        let mut cur = plan_of(&[("Amy", c.clone()), ("Bea", c.clone())]).data;
+        let a = actor();
+        let id = |d: &Data, n: &str| {
+            let s = pair(d, n).0;
+            let mut r = d.records.iter();
+            r.find(|r| r.staff_id == s && r.stage_index == 2)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let (amy, bea) = (id(&cur, "Amy"), id(&cur, "Bea"));
+        ops::delete_record(&mut cur, &a, &amy).unwrap();
+        ops::mark_records_due(&mut cur, &a, &[bea]).unwrap();
+        let (d, r) = update(&cur, &plan_of(&[("Amy", c.clone()), ("Bea", c.clone())]));
+        assert!(r.added.is_empty(), "{:?}", r.added);
+        assert_eq!(r.kept.len(), 2);
+        assert_eq!(d.due_overrides, cur.due_overrides);
+        // Ticked since: Bea has done it now.
+        c[2].ticked = true;
+        let (d, _) = update(&cur, &plan_of(&[("Amy", c.clone()), ("Bea", c.clone())]));
+        assert_eq!((dates(&d, "Amy").len(), dates(&d, "Bea").len()), (2, 3));
+        assert!(d.due_overrides.is_empty());
+        // Once the deletion is reverted it no longer counts.
+        cur.audit.iter_mut().for_each(|e| e.reverted = true);
+        let (d, _) = update(&cur, &plan_of(&[("Amy", c.clone()), ("Bea", c)]));
+        assert_eq!(dates(&d, "Amy").len(), 3);
     }
 
     /// Updates a real snapshot from a real workbook:

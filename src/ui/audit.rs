@@ -9,8 +9,8 @@ use egui_phosphor::regular as icon;
 use crate::model::{AuditEntry, Data, Id};
 use crate::query::{distinct_audit_users, filter_audit, AuditFilter};
 use crate::session::Session;
-use crate::ui::app::Ctx;
-use crate::ui::theme::Palette;
+use crate::ui::app::{Ctx, Toast};
+use crate::ui::theme::{medium, Palette};
 use crate::ui::widgets::{
     chip_select, date_picker, empty_state, search_box, section_chip, section_color, SEARCH_W,
 };
@@ -19,7 +19,7 @@ use crate::ui::widgets::{
 const ROW_H: f32 = 44.0;
 
 /// (chip label, action prefix) for the action-type filter.
-const ACTIONS: [(&str, &str); 12] = [
+const ACTIONS: [(&str, &str); 13] = [
     ("Record", "record."),
     ("Delay", "delay."),
     ("Skip", "stage."),
@@ -32,11 +32,14 @@ const ACTIONS: [(&str, &str); 12] = [
     ("Settings", "settings."),
     ("Import", "import."),
     ("Lock", "lock."),
+    ("Revert", "history."),
 ];
 
 #[derive(Default)]
 pub(crate) struct AuditState {
     pub filter: AuditFilter,
+    /// Asking whether to revert: (revision when asked).
+    confirm: Option<u64>,
     /// Matching entries for (revision, filter).
     cache: Option<(u64, FilterKey, Vec<AuditEntry>)>,
 }
@@ -80,9 +83,23 @@ impl AuditState {
 
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut AuditState) {
     let pal = cx.pal;
-    let data = cx.session.data();
-    ui.label(RichText::new(format!("{} recorded changes", data.audit.len())).color(pal.muted));
+    ui.label(
+        RichText::new(format!(
+            "{} recorded changes",
+            cx.session.data().audit.len()
+        ))
+        .color(pal.muted),
+    );
+    ui.add_space(8.0);
+    if revert_bar(ui, cx, &mut state.confirm) {
+        let msg = match cx.session.revert_latest(cx.now) {
+            Ok(what) => format!("Reverted: {what}"),
+            Err(e) => format!("Couldn't revert: {e}"),
+        };
+        cx.toasts.push(Toast::new(msg));
+    }
     ui.add_space(12.0);
+    let data = cx.session.data();
     filters(ui, pal, data, &mut state.filter, cx.today);
     ui.add_space(12.0);
     state.refresh(cx.session);
@@ -119,6 +136,102 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut AuditState) {
         });
 }
 
+/// How many of a change's lines the question lists.
+const REVERT_LINES: usize = 8;
+
+/// The latest change that can be reverted and the button that does, which
+/// asks first. Returns true when it is to be reverted now.
+fn revert_bar(ui: &mut egui::Ui, cx: &Ctx, confirm: &mut Option<u64>) -> bool {
+    let pal = cx.pal;
+    let editing = cx.session.is_editing();
+    let rev = cx.session.revision();
+    // Something changed since it was asked (or editing ended): ask again.
+    if *confirm != Some(rev) || !editing {
+        *confirm = None;
+    }
+    let latest = cx.session.data().undo.last();
+    let mut go = false;
+    Frame::new()
+        .fill(pal.card)
+        .stroke(Stroke::new(1.0, pal.border))
+        .corner_radius(10)
+        .inner_margin(Margin::symmetric(16, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let Some(u) = latest else {
+                ui.label(
+                    RichText::new(
+                        "Nothing to revert yet. Changes made from now on can be reverted, latest first.",
+                    )
+                    .color(pal.muted),
+                );
+                return;
+            };
+            let more = match u.details.len() - 1 {
+                0 => String::new(),
+                n => format!(" (and {n} more)"),
+            };
+            ui.horizontal(|ui| {
+                let button = Button::new(format!(
+                    "{}  Revert latest change",
+                    icon::ARROW_COUNTER_CLOCKWISE
+                ));
+                if ui
+                    .add_enabled(editing && confirm.is_none(), button)
+                    .on_disabled_hover_text("Start editing to make changes")
+                    .clicked()
+                {
+                    *confirm = Some(rev);
+                }
+                ui.add(
+                    Label::new(
+                        RichText::new(format!("{}{more}", u.details[0])).color(pal.text),
+                    )
+                    .truncate(),
+                );
+            });
+            ui.label(
+                RichText::new(format!(
+                    "{} \u{b7} {}",
+                    u.at.format("%-d %b %Y %H:%M"),
+                    u.by
+                ))
+                .size(12.0)
+                .color(pal.muted),
+            );
+            if confirm.is_some() {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Revert this change? Everything goes back to how it was before it.")
+                        .family(medium())
+                        .color(pal.text),
+                );
+                for d in u.details.iter().take(REVERT_LINES) {
+                    ui.label(RichText::new(format!("\u{2022} {d}")).color(pal.muted));
+                }
+                if u.details.len() > REVERT_LINES {
+                    ui.label(
+                        RichText::new(format!("and {} more", u.details.len() - REVERT_LINES))
+                            .color(pal.muted),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(RichText::new("Revert").color(pal.red_fg))
+                        .clicked()
+                    {
+                        go = true;
+                        *confirm = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        *confirm = None;
+                    }
+                });
+            }
+        });
+    go
+}
+
 fn row(ui: &mut egui::Ui, pal: &Palette, data: &Data, e: &AuditEntry) {
     let width = ui.available_width();
     // The section it concerns, when it names one that still exists.
@@ -140,8 +253,15 @@ fn row(ui: &mut egui::Ui, pal: &Palette, data: &Data, e: &AuditEntry) {
             if let Some((sec, color)) = section {
                 section_chip(ui, pal, &sec.name, color);
             }
+            if e.reverted {
+                ui.label(RichText::new("Reverted").size(12.0).color(pal.yellow_fg));
+            }
         });
-        ui.add(Label::new(RichText::new(&e.detail).color(pal.text)).truncate());
+        let mut text = RichText::new(&e.detail).color(pal.text);
+        if e.reverted {
+            text = text.color(pal.muted).strikethrough();
+        }
+        ui.add(Label::new(text).truncate());
     });
 }
 

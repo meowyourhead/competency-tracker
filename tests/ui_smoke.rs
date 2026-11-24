@@ -1392,6 +1392,7 @@ fn audit_filter_by_user() {
             action: "staff.add".into(),
             detail: detail.into(),
             refs: Default::default(),
+            reverted: false,
         };
         d.audit.push(entry("jtan", "Added Bob to personnel"));
         d.audit.push(entry("mlee", "Added Cara to personnel"));
@@ -1521,6 +1522,7 @@ fn history_with_section(
             action: "record.add".into(),
             detail: "Marked Cobas complete for Bob".into(),
             refs: [("section_id".to_string(), sec)].into(),
+            reverted: false,
         });
     })
     .unwrap();
@@ -1614,6 +1616,164 @@ fn confirm_all_unconfirmed() {
             .count(),
         0
     );
+}
+
+/// Agnes (active) and Bram (removed) with two unconfirmed records each, on the
+/// Import & export tab.
+fn review_list(dir: &tempfile::TempDir) -> Harness<'static, TrackerApp> {
+    let mut s = session(dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        let test = |id: &str, name: &str, order| TestSystem {
+            id: id.into(),
+            name: name.into(),
+            order,
+            retired: false,
+            rule_id: None,
+        };
+        d.sections[0].tests = vec![test("t-cobas", "Cobas", 0), test("t-arch", "Architect", 1)];
+        for (id, name) in [("p-agnes", "Agnes"), ("p-bram", "Bram")] {
+            let mut p = staff(id, name, "MLT", "t-cobas");
+            if id == "p-bram" {
+                p.status = StaffStatus::Removed;
+            }
+            d.staff.push(p);
+            for t in ["t-cobas", "t-arch"] {
+                let mut r = initial(id, t, 300);
+                r.imported = true;
+                r.unconfirmed = true;
+                d.records.push(r);
+            }
+        }
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    go_settings_tab(&mut h, "Import & export");
+    h
+}
+
+fn unconfirmed(h: &Harness<'static, TrackerApp>) -> Vec<String> {
+    let d = h.state().session().data();
+    d.records
+        .iter()
+        .filter(|r| r.unconfirmed)
+        .map(|r| r.id.clone())
+        .collect()
+}
+
+#[test]
+fn review_leaves_removed_staff_out_and_can_ignore_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = review_list(&dir);
+    h.get_by_label("2 shown");
+    assert!(h.query_by_label("Bram").is_none());
+    button(&h, "Removed staff (2)").click();
+    h.run();
+    button(&h, "Ignore all").click();
+    h.run();
+    h.get_by_label("Leave all 2 records out of the review?");
+    button(&h, "Ignore").click();
+    h.run();
+    button(&h, "Removed staff (0)");
+    assert_eq!(unconfirmed(&h).len(), 4, "still unconfirmed");
+    button(&h, "Ignored (2)").click();
+    h.run();
+    button(&h, "Put all back").click();
+    h.run();
+    button(&h, "Removed staff (2)");
+}
+
+#[test]
+fn review_search_narrows_what_the_actions_apply_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = review_list(&dir);
+    let search = |h: &Harness<'static, TrackerApp>| {
+        let found = h
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()));
+        found.unwrap().rect().center()
+    };
+    let at = search(&h);
+    h.hover_at(at);
+    h.drag_at(at);
+    h.drop_at(at);
+    h.run();
+    h.event(egui::Event::Text("arch init".into()));
+    h.run();
+    h.get_by_label("1 shown");
+    button(&h, "Confirm all").click();
+    h.run();
+    button(&h, "Confirm").click();
+    h.run();
+    let left = unconfirmed(&h);
+    assert_eq!(left.len(), 3);
+    assert!(!left.contains(&"r-p-agnes-t-arch".to_owned()));
+}
+
+#[test]
+fn review_marks_due_and_edits_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = review_list(&dir);
+    button(&h, "Edit all\u{2026}").click();
+    h.run();
+    h.get_by_label("Confirm them too").click();
+    h.run();
+    h.get_by_label("Set the comment").click();
+    h.run();
+    button(&h, "Apply changes").click();
+    h.run();
+    assert_eq!(unconfirmed(&h).len(), 2);
+    button(&h, "Removed staff (2)").click();
+    h.run();
+    button(&h, "Mark all as due").click();
+    h.run();
+    button(&h, "Mark as due").click();
+    h.run();
+    let d = h.state().session().data();
+    assert_eq!((d.records.len(), d.due_overrides.len()), (2, 2));
+    h.get_by_label("Nothing to review");
+}
+
+#[test]
+fn history_reverts_the_latest_change_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = review_list(&dir);
+    for label in ["Confirm all", "Confirm"] {
+        button(&h, label).click();
+        h.run();
+    }
+    button(&h, "Removed staff (2)").click();
+    h.run();
+    for label in ["Delete all", "Delete"] {
+        button(&h, label).click();
+        h.run();
+    }
+    assert_eq!(h.state().session().data().records.len(), 2);
+    button(&h, "History").click();
+    h.run();
+    let revert = |h: &mut Harness<'static, TrackerApp>| {
+        h.get_by_label_contains("Revert latest change").click();
+        h.run();
+        button(h, "Revert").click();
+        h.run();
+    };
+    // The deletion goes first, then the confirmation.
+    revert(&mut h);
+    assert_eq!(h.state().session().data().records.len(), 4);
+    assert_eq!(unconfirmed(&h).len(), 2);
+    revert(&mut h);
+    assert_eq!(unconfirmed(&h).len(), 4);
+    let d = h.state().session().data();
+    assert_eq!(d.audit.iter().filter(|e| e.reverted).count(), 3);
+    assert_eq!(
+        d.audit.last().unwrap().detail,
+        "Reverted: Confirmed 2 imported records"
+    );
+    // Viewing: no reverting.
+    button(&h, "Stop editing").click();
+    h.run();
+    let b = h.get_by_label_contains("Revert latest change");
+    assert!(b.accesskit_node().is_disabled());
 }
 
 #[test]

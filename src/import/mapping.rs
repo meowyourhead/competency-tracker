@@ -1414,6 +1414,7 @@ pub fn build_import(
             report.notes
         ),
         refs: BTreeMap::new(),
+        reverted: false,
     });
     ImportPlan {
         data,
@@ -1623,6 +1624,7 @@ mod tests {
             action: "staff.add".into(),
             detail: "old".into(),
             refs: Default::default(),
+            reverted: false,
         };
         current.audit = vec![old.clone()];
         assert_eq!(plan.audit.len(), 1);

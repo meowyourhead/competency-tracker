@@ -5,6 +5,7 @@
 
 mod general;
 mod import_export;
+mod review;
 mod schedule;
 mod sections_tests;
 

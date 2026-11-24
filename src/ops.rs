@@ -53,6 +53,7 @@ fn log(d: &mut Data, a: &Actor, action: &str, detail: String, refs: &[(&str, &st
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect::<BTreeMap<_, _>>(),
+        reverted: false,
     });
 }
 
@@ -235,6 +236,102 @@ pub fn confirm_records(d: &mut Data, a: &Actor, ids: &[Id]) -> Res<usize> {
         );
     }
     Ok(n)
+}
+
+/// Leaves records out of the review list, or (`false`) puts them back. They
+/// stay unconfirmed. Returns how many changed; nothing is audited when none do.
+pub fn set_review_ignored(d: &mut Data, a: &Actor, ids: &[Id], ignored: bool) -> Res<usize> {
+    let mut n = 0;
+    for id in ids {
+        let at = d.review_ignored.iter().position(|x| x == id);
+        match (at, ignored) {
+            (None, true) if d.records.iter().any(|r| r.id == *id) => {
+                d.review_ignored.push(id.clone());
+                n += 1;
+            }
+            (Some(i), false) => {
+                d.review_ignored.remove(i);
+                n += 1;
+            }
+            _ => {}
+        }
+    }
+    if n > 0 {
+        let s = if n == 1 { "" } else { "s" };
+        let detail = if ignored {
+            format!("Left {n} imported record{s} out of the review")
+        } else {
+            format!("Put {n} imported record{s} back in the review")
+        };
+        log(d, a, "record.ignore", detail, &[]);
+    }
+    Ok(n)
+}
+
+/// Turns unconfirmed records into due dates: they weren't done. Each person's
+/// test is then due on the first of these dates after what they have done.
+/// Returns how many records it took out.
+pub fn mark_records_due(d: &mut Data, a: &Actor, ids: &[Id]) -> Res<usize> {
+    let gone: Vec<Record> = d
+        .records
+        .iter()
+        .filter(|r| r.unconfirmed && ids.contains(&r.id))
+        .cloned()
+        .collect();
+    d.records.retain(|r| !gone.iter().any(|g| g.id == r.id));
+    d.review_ignored
+        .retain(|id| !gone.iter().any(|g| g.id == *id));
+    let mut pairs: Vec<(Id, Id)> = gone
+        .iter()
+        .map(|r| (r.staff_id.clone(), r.test_id.clone()))
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    for (staff, test) in pairs {
+        let is = |s: &str, t: &str| s == staff && t == test;
+        let done = d
+            .records
+            .iter()
+            .filter(|r| is(&r.staff_id, &r.test_id))
+            .map(|r| r.completed_on)
+            .max();
+        let due = gone
+            .iter()
+            .filter(|r| is(&r.staff_id, &r.test_id))
+            .map(|r| r.completed_on)
+            .filter(|on| done.is_none_or(|x| *on > x))
+            .min();
+        let Some(due) = due else { continue };
+        d.due_overrides.retain(|o| !is(&o.staff_id, &o.test_id));
+        d.due_overrides.push(DueOverride {
+            staff_id: staff.clone(),
+            test_id: test.clone(),
+            due_on: due,
+            source: OverrideSource::Excel,
+            by: a.user.clone(),
+            at: a.now,
+        });
+    }
+    for r in &gone {
+        let name = staff_name(d, &r.staff_id).unwrap_or_default();
+        let (section_id, test_name) = test_info(d, &r.test_id).unwrap_or_default();
+        log(
+            d,
+            a,
+            "record.due",
+            format!(
+                "Marked {test_name} {} as due, not done, for {name} on {}",
+                r.stage_label,
+                fmt_date(r.completed_on)
+            ),
+            &[
+                ("staff_id", &r.staff_id),
+                ("test_id", &r.test_id),
+                ("section_id", &section_id),
+            ],
+        );
+    }
+    Ok(gone.len())
 }
 
 pub fn add_delay_note(
@@ -1437,6 +1534,41 @@ mod tests {
         assert!(d.records.iter().all(|r| !r.unconfirmed));
         assert_eq!(d.audit.len(), n + 1);
         assert_eq!(d.audit.last().unwrap().action, "record.confirm");
+    }
+
+    #[test]
+    fn unconfirmed_records_become_due_dates() {
+        let (mut d, _, t1, t2, st) = fixture();
+        let a = actor();
+        let done = add_completion(&mut d, &a, &st, &t1, 0, day(2026, 1, 1), "").unwrap();
+        let semi = add_completion(&mut d, &a, &st, &t1, 1, day(2026, 7, 1), "").unwrap();
+        let ann = add_completion(&mut d, &a, &st, &t1, 2, day(2026, 10, 1), "").unwrap();
+        let other = add_completion(&mut d, &a, &st, &t2, 0, day(2026, 3, 1), "").unwrap();
+        for r in d.records.iter_mut().filter(|r| r.id != done) {
+            r.unconfirmed = true;
+        }
+        // A confirmed record is never taken out.
+        let ids = [done.clone(), semi, ann];
+        assert_eq!(mark_records_due(&mut d, &a, &ids).unwrap(), 2);
+        assert_eq!(
+            d.records.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            [&done, &other]
+        );
+        assert_eq!(d.due_overrides.len(), 1);
+        assert_eq!(d.due_overrides[0].due_on, day(2026, 7, 1));
+        // Ignoring: in, out, and nothing audited when nothing changes.
+        assert_eq!(
+            set_review_ignored(&mut d, &a, std::slice::from_ref(&other), true),
+            Ok(1)
+        );
+        let n = d.audit.len();
+        assert_eq!(
+            set_review_ignored(&mut d, &a, std::slice::from_ref(&other), true),
+            Ok(0)
+        );
+        assert_eq!(d.audit.len(), n);
+        assert_eq!(set_review_ignored(&mut d, &a, &[other], false), Ok(1));
+        assert!(d.review_ignored.is_empty());
     }
 
     #[test]

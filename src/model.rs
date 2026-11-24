@@ -246,6 +246,9 @@ pub struct AuditEntry {
     pub action: String,
     pub detail: String,
     pub refs: BTreeMap<String, String>,
+    /// The change was reverted later.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -273,6 +276,12 @@ pub struct Data {
     pub notes: Vec<Note>,
     #[serde(default)]
     pub audit: Vec<AuditEntry>,
+    /// Unconfirmed records (ids) left out of the review list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_ignored: Vec<Id>,
+    /// How to revert the latest changes, oldest first (see `undo`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<crate::undo::UndoEntry>,
 }
 
 impl Data {
@@ -313,6 +322,8 @@ impl Data {
             delay_notes: vec![],
             notes: vec![],
             audit: vec![],
+            review_ignored: vec![],
+            undo: vec![],
         }
     }
 
