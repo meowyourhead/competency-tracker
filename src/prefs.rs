@@ -15,8 +15,8 @@ pub enum Theme {
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum ProfileView {
-    #[default]
     Cards,
+    #[default]
     Table,
 }
 
@@ -31,6 +31,9 @@ pub struct Prefs {
     pub sidebar_collapsed: bool,
     /// One of [`DISPLAY_SCALES`]; anything else reads as 100%.
     pub display_scale: f32,
+    /// Saved under a new name since the table became the default: earlier
+    /// versions wrote "cards" to `profile_view` whether or not it was chosen.
+    #[serde(rename = "profile_layout")]
     pub profile_view: ProfileView,
 }
 
@@ -146,17 +149,23 @@ mod tests {
     }
 
     #[test]
-    fn old_prefs_default_to_cards() {
+    fn old_prefs_default_to_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prefs.json");
         std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
-        assert_eq!(load_prefs_from(&path).profile_view, ProfileView::Cards);
+        assert_eq!(load_prefs_from(&path).profile_view, ProfileView::Table);
+        // Written by a version whose default was cards.
+        std::fs::write(&path, r#"{"theme":"dark","profile_view":"cards"}"#).unwrap();
+        let old = load_prefs_from(&path);
+        assert_eq!(old.profile_view, ProfileView::Table);
+        assert_eq!(old.theme, Theme::Dark);
+        // Chosen since: remembered.
         let saved = Prefs {
-            profile_view: ProfileView::Table,
+            profile_view: ProfileView::Cards,
             ..Prefs::default()
         };
         save_prefs_to(&path, &saved).unwrap();
-        assert_eq!(load_prefs_from(&path).profile_view, ProfileView::Table);
+        assert_eq!(load_prefs_from(&path).profile_view, ProfileView::Cards);
     }
 
     #[test]

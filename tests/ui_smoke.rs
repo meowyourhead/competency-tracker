@@ -1239,6 +1239,53 @@ fn open_agnes(h: &mut Harness<'static, TrackerApp>) {
     h.run();
 }
 
+/// Profiles open as a table; this switches to cards.
+fn show_cards(h: &mut Harness<'static, TrackerApp>) {
+    h.get_by_label("Cards").click();
+    h.run();
+}
+
+#[test]
+fn personnel_sorts_by_join_date_then_by_the_heading_clicked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(&dir, 1);
+    s.mutate(now_ts(), |d, _| {
+        for (id, name, year) in [
+            ("p-a", "Agnes", Some(2021)),
+            ("p-b", "Bram", Some(2012)),
+            ("p-c", "Cara", None),
+        ] {
+            let mut p = staff(id, name, "MLT", "t-cobas");
+            p.joined = year.and_then(|y| chrono::NaiveDate::from_ymd_opt(y, 5, 1));
+            d.staff.push(p);
+        }
+    })
+    .unwrap();
+    let mut h = harness(TrackerApp::new_for_test(s));
+    h.run();
+    go_personnel(&mut h);
+    fn listed(h: &Harness<'static, TrackerApp>) -> Vec<&'static str> {
+        let mut v = ["Agnes", "Bram", "Cara"];
+        v.sort_by(|a, b| {
+            let top = |n| button(h, n).rect().top();
+            top(*a).total_cmp(&top(*b))
+        });
+        v.to_vec()
+    }
+    assert_eq!(listed(&h), ["Bram", "Agnes", "Cara"], "earliest first");
+    let mut click = |label: &str| {
+        button(&h, label).click();
+        h.run();
+        listed(&h)
+    };
+    assert_eq!(click("Sort by Joined"), ["Agnes", "Bram", "Cara"]);
+    assert_eq!(click("Sort by Name"), ["Agnes", "Bram", "Cara"]);
+    assert_eq!(click("Sort by Name"), ["Cara", "Bram", "Agnes"]);
+    button(&h, "Bram").click();
+    h.run();
+    h.get_by_label("\u{2190} All staff");
+}
+
 #[test]
 fn profile_status_strip_counts() {
     let dir = tempfile::tempdir().unwrap();
@@ -1265,6 +1312,7 @@ fn profile_cards_show_last_done() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
     open_agnes(&mut h);
+    show_cards(&mut h);
     h.get_by_label_contains("Last done ");
 }
 
@@ -1275,18 +1323,27 @@ fn profile_cards_narrow_window() {
     h.set_size(egui::vec2(900.0, 800.0));
     h.run();
     open_agnes(&mut h);
+    show_cards(&mut h);
     h.get_by_label("Cobas");
     h.get_by_label("Overdue 1");
 }
 
 #[test]
-fn profile_table_view() {
+fn profile_opens_as_table_with_its_buttons_right_above() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
     open_agnes(&mut h);
-    h.get_by_label("Table").click();
-    h.run();
-    h.get_by_label("Last done");
+    let head = h.get_by_label("Last done").rect();
+    let next = h.get_by_label_contains("Next up:").rect();
+    let table = h.get_by_label("Table").rect();
+    for b in [
+        table,
+        h.get_by_label("Cards").rect(),
+        h.get_by_label_contains("  Edit").rect(),
+    ] {
+        assert!(b.top() > next.bottom() && b.bottom() < head.top());
+        assert!(b.left() - table.left() < 250.0, "on the left");
+    }
     h.get_by_label("Cobas").click();
     h.run();
     h.get_by_label("Close panel");
@@ -1299,8 +1356,7 @@ fn profile_filter_survives_view_toggle() {
     open_agnes(&mut h);
     h.get_by_label("Overdue 1").click();
     h.run();
-    h.get_by_label("Table").click();
-    h.run();
+    show_cards(&mut h);
     h.get_by_label("Cobas");
     assert!(h.query_by_label("Architect").is_none(), "filtered out");
 }
@@ -1341,11 +1397,10 @@ fn profile_view_is_remembered() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = seeded(&dir, 365);
     open_agnes(&mut h);
-    h.get_by_label("Table").click();
-    h.run();
+    show_cards(&mut h);
     assert_eq!(
         h.state().prefs().profile_view,
-        competency_tracker::prefs::ProfileView::Table
+        competency_tracker::prefs::ProfileView::Cards
     );
 }
 
@@ -1452,8 +1507,6 @@ fn profile_table_fits_beside_panel() {
     let dir = tempfile::tempdir().unwrap();
     let (mut h, due) = seeded_long(&dir);
     open_agnes(&mut h);
-    h.get_by_label("Table").click();
-    h.run();
     h.get_by_role_and_label(egui::accesskit::Role::Button, LONG_TEST)
         .click();
     h.run();
@@ -1475,6 +1528,7 @@ fn profile_cards_fit_beside_panel() {
     let dir = tempfile::tempdir().unwrap();
     let (mut h, due) = seeded_long(&dir);
     open_agnes(&mut h);
+    show_cards(&mut h);
     h.get_by_role_and_label(egui::accesskit::Role::Button, LONG_TEST)
         .click();
     h.run();

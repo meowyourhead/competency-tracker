@@ -94,32 +94,7 @@ pub(crate) fn show(
         out.back = true;
     }
     ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        heading(ui, &staff.name);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let edit = ui.add_enabled(
-                editing,
-                Button::new(format!("{}  Edit", icon::PENCIL_SIMPLE)),
-            );
-            if edit
-                .on_disabled_hover_text("Start editing to make changes")
-                .clicked()
-            {
-                out.edit = true;
-            }
-            if !rows.is_empty() {
-                ui.add_space(4.0);
-                let current = usize::from(*cx.profile_view == ProfileView::Table);
-                if let Some(i) = segmented(ui, pal, current, &["Cards", "Table"]) {
-                    *cx.profile_view = if i == 0 {
-                        ProfileView::Cards
-                    } else {
-                        ProfileView::Table
-                    };
-                }
-            }
-        });
-    });
+    heading(ui, &staff.name);
     let mut bits = Vec::new();
     if !staff.title.is_empty() {
         bits.push(staff.title.clone());
@@ -137,6 +112,7 @@ pub(crate) fn show(
     }
     if rows.is_empty() {
         ui.add_space(12.0);
+        out.edit = edit_button(ui, editing);
         empty_state(
             ui,
             "No assignments",
@@ -167,6 +143,17 @@ pub(crate) fn show(
     }
     ui.add_space(14.0);
 
+    // Right above the tests, on the left, where the eye already is.
+    ui.horizontal_wrapped(|ui| {
+        const VIEWS: [ProfileView; 2] = [ProfileView::Table, ProfileView::Cards];
+        let current = usize::from(*cx.profile_view == ProfileView::Cards);
+        if let Some(i) = segmented(ui, pal, current, &["Table", "Cards"]) {
+            *cx.profile_view = VIEWS[i];
+        }
+        out.edit = edit_button(ui, editing);
+    });
+    ui.add_space(4.0);
+
     let shown = filtered(rows, st.filter);
     if shown.is_empty() {
         empty_state(ui, "Nothing here", "No tests have this status.");
@@ -183,6 +170,16 @@ pub(crate) fn show(
         *cx.open_detail = Some((staff.id.clone(), t));
     }
     out
+}
+
+/// Opens the person's details and assignments. Needs edit mode.
+fn edit_button(ui: &mut egui::Ui, editing: bool) -> bool {
+    ui.add_enabled(
+        editing,
+        Button::new(format!("{}  Edit", icon::PENCIL_SIMPLE)),
+    )
+    .on_disabled_hover_text("Start editing to make changes")
+    .clicked()
 }
 
 /// One clickable count in the status strip.

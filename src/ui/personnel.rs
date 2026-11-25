@@ -2,11 +2,13 @@
 //! profile and the permanent-delete confirmation. The add / edit dialog is in
 //! `staff_editor.rs`.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::NaiveDate;
 use egui::{
-    Align, Button, Color32, Frame, Layout, Margin, Modal, Popup, RichText, Stroke, TextEdit, Vec2,
+    Align, Button, Color32, CornerRadius, FontId, Frame, Layout, Margin, Modal, Popup, RichText,
+    Sense, Stroke, StrokeKind, TextEdit, Vec2, WidgetInfo, WidgetType,
 };
 use egui_phosphor::regular as icon;
 
@@ -25,9 +27,23 @@ use crate::ui::widgets::{
     search_box, section_chip_width, segmented, SEARCH_W,
 };
 
+/// What the list is sorted by: one of its columns.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum SortBy {
+    Name,
+    Title,
+    #[default]
+    Joined,
+    Sections,
+    Due,
+}
+
 #[derive(Default)]
 pub(crate) struct PersonnelState {
     pub filter: StaffFilter,
+    /// Earliest join date first, until another column is picked.
+    sort: SortBy,
+    descending: bool,
     /// The add / edit dialog, while open.
     pub editing: Option<StaffForm>,
     /// Person whose profile is open (also set by search navigation).
@@ -46,6 +62,8 @@ pub(crate) struct PersonnelState {
 struct Summary {
     /// Sections with at least one assigned test.
     sections: Vec<(String, Color32)>,
+    /// Those sections' places in the section order, for sorting.
+    section_order: Vec<usize>,
     /// The earliest due pill across their assigned tests.
     next: Option<(DueInfo, DueStatus)>,
 }
@@ -116,6 +134,7 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
         .iter()
         .map(|s| {
             let mut names = Vec::new();
+            let mut section_order = Vec::new();
             let mut next: Option<(DueInfo, DueStatus)> = None;
             for (pos, sec) in sections.iter().enumerate().filter(|(_, x)| !x.retired) {
                 let mut any = false;
@@ -139,17 +158,48 @@ fn summaries(data: &Data, today: NaiveDate) -> HashMap<Id, Summary> {
                 }
                 if any {
                     names.push((sec.name.clone(), rgb(sec.color_rgb(pos))));
+                    section_order.push(pos);
                 }
             }
             (
                 s.id.clone(),
                 Summary {
                     sections: names,
+                    section_order,
                     next,
                 },
             )
         })
         .collect()
+}
+
+/// Sorts people already in name order (which settles ties). Those with
+/// nothing to sort by (no join date, say) come last in either direction.
+fn sort_staff(staff: &mut [&Staff], sums: &HashMap<Id, Summary>, sort: SortBy, descending: bool) {
+    fn order<K: Ord>(a: Option<K>, b: Option<K>, descending: bool) -> Ordering {
+        match (a, b) {
+            (Some(a), Some(b)) if descending => b.cmp(&a),
+            (Some(a), Some(b)) => a.cmp(&b),
+            (a, b) => a.is_none().cmp(&b.is_none()),
+        }
+    }
+    let title = |s: &Staff| (!s.title.is_empty()).then(|| s.title.to_lowercase());
+    let sections = |s: &Staff| {
+        let places = &sums.get(&s.id)?.section_order;
+        (!places.is_empty()).then_some(places)
+    };
+    let due = |s: &Staff| sums.get(&s.id)?.next.as_ref()?.0.due_on;
+    staff.sort_by(|a, b| match sort {
+        SortBy::Name => order(
+            Some(a.name.to_lowercase()),
+            Some(b.name.to_lowercase()),
+            descending,
+        ),
+        SortBy::Title => order(title(a), title(b), descending),
+        SortBy::Joined => order(a.joined, b.joined, descending),
+        SortBy::Sections => order(sections(a), sections(b), descending),
+        SortBy::Due => order(due(a), due(b), descending),
+    });
 }
 
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
@@ -470,6 +520,8 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
     state.refresh(cx.session, cx.today);
     let PersonnelState {
         filter,
+        sort,
+        descending,
         cache,
         selected,
         ..
@@ -483,7 +535,8 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
         return;
     }
     ui.add_space(12.0);
-    let staff = filter_staff(data, filter);
+    let mut staff = filter_staff(data, filter);
+    sort_staff(&mut staff, sums, *sort, *descending);
     // Batch actions only ever touch people the list is showing.
     selected.retain(|id| staff.iter().any(|s| s.id == *id));
     let tab = filter.status.unwrap_or(StaffStatus::Active);
@@ -515,10 +568,10 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
         .inner_margin(Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let (sections_w, narrow) = sections_width(ui, pal, &staff, sums);
+            let cols = columns(ui, pal, &staff, sums);
             // Its own id per shape, so column widths never carry across.
-            egui::Grid::new(("staff_table", narrow))
-                .num_columns(if narrow { 5 } else { 7 })
+            egui::Grid::new(("staff_table", cols.title, cols.joined))
+                .num_columns(5 + usize::from(cols.title) + usize::from(cols.joined))
                 .spacing([20.0, 10.0])
                 .show(ui, |ui| {
                     let all = staff.iter().all(|s| selected.contains(&s.id));
@@ -534,12 +587,19 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                             selected.extend(staff.iter().map(|s| s.id.clone()));
                         }
                     }
-                    for head in ["Name", "Title", "Joined", "Sections", "Next due", ""] {
-                        if narrow && matches!(head, "Title" | "Joined") {
+                    for (head, key) in HEADS {
+                        if (key == SortBy::Title && !cols.title)
+                            || (key == SortBy::Joined && !cols.joined)
+                        {
                             continue;
                         }
-                        ui.label(RichText::new(head).color(pal.muted).size(12.5));
+                        let on = *sort == key;
+                        if sort_head(ui, pal, head, on, *descending).clicked() {
+                            *descending = on && !*descending;
+                            *sort = key;
+                        }
                     }
+                    ui.label("");
                     ui.end_row();
                     for s in &staff {
                         let mut on = selected.contains(&s.id);
@@ -553,14 +613,13 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                                 selected.remove(&s.id);
                             }
                         }
-                        let name =
-                            Button::new(RichText::new(&s.name).family(medium()).color(pal.text))
-                                .frame(false);
-                        if ui.add(name).clicked() {
+                        if name_button(ui, pal, &s.name, cols.name_w).clicked() {
                             open = Some(s.id.clone());
                         }
-                        if !narrow {
+                        if cols.title {
                             ui.label(RichText::new(&s.title).color(pal.muted));
+                        }
+                        if cols.joined {
                             ui.label(
                                 RichText::new(s.joined.map_or("\u{2014}".to_owned(), fmt_date))
                                     .color(pal.muted),
@@ -571,7 +630,7 @@ fn list(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut PersonnelState) {
                             ui,
                             pal,
                             sum.map_or(&[], |m| m.sections.as_slice()),
-                            sections_w,
+                            cols.sections_w,
                         );
                         match sum.and_then(|m| m.next.as_ref()) {
                             Some((info, status)) => {
@@ -807,28 +866,129 @@ fn filters(
 const CHIP_GAP: f32 = 6.0;
 const CHIP_H: f32 = 18.0;
 
-/// The Sections column's width: wide enough for everyone's chips on one
-/// line, unless the other columns need the room (then the chips wrap).
-/// Also whether the table is too narrow for the Title and Joined columns
-/// (each person's profile still shows both).
-fn sections_width(
-    ui: &egui::Ui,
-    pal: &Palette,
-    staff: &[&Staff],
-    sums: &HashMap<Id, Summary>,
-) -> (f32, bool) {
-    let text = |t: &str, family: egui::FontFamily| {
-        let size = egui::TextStyle::Body.resolve(ui.style()).size;
-        ui.painter()
-            .layout_no_wrap(t.to_owned(), egui::FontId::new(size, family), pal.text)
-            .size()
-            .x
+/// The sortable columns, in order.
+const HEADS: [(&str, SortBy); 5] = [
+    ("Name", SortBy::Name),
+    ("Title", SortBy::Title),
+    ("Joined", SortBy::Joined),
+    ("Sections", SortBy::Sections),
+    ("Next due", SortBy::Due),
+];
+const HEAD_SIZE: f32 = 12.5;
+
+/// A heading's text with its sort mark: which way the list is sorted, or
+/// that it can be.
+fn head_text(head: &str, on: bool, descending: bool) -> String {
+    let mark = match (on, descending) {
+        (false, _) => icon::CARET_UP_DOWN,
+        (true, false) => icon::CARET_UP,
+        (true, true) => icon::CARET_DOWN,
     };
+    format!("{head} {mark}")
+}
+
+/// A column heading that sorts the list; a second click reverses it.
+fn sort_head(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    head: &str,
+    on: bool,
+    descending: bool,
+) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        head_text(head, on, descending),
+        FontId::proportional(HEAD_SIZE),
+        Color32::PLACEHOLDER,
+    );
+    let size = Vec2::new(galley.size().x, ui.spacing().interact_size.y);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let lit = on || resp.hovered() || resp.has_focus();
+        let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+        let color = if lit { pal.text } else { pal.muted };
+        ui.painter()
+            .galley_with_override_text_color(pos, galley, color);
+    }
+    let label = format!("Sort by {head}");
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, &label));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if on { "Reverse the order" } else { &label })
+}
+
+const NAME_H: f32 = 30.0;
+const NAME_PAD: f32 = 12.0;
+/// Room for the arrow at the end of a name button.
+const NAME_ARROW_W: f32 = 22.0;
+
+/// A person's name as a button that opens their profile, `width` wide so the
+/// names line up as one column of buttons.
+fn name_button(ui: &mut egui::Ui, pal: &Palette, name: &str, width: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, NAME_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let lit = resp.hovered() || resp.has_focus();
+        let (stroke, arrow) = if lit {
+            (Stroke::new(1.0, pal.accent), pal.accent)
+        } else {
+            (Stroke::new(1.0, pal.muted.gamma_multiply(0.45)), pal.muted)
+        };
+        let p = ui.painter();
+        let radius = CornerRadius::same(8);
+        p.rect(rect, radius, pal.sidebar, stroke, StrokeKind::Inside);
+        if lit {
+            let strength = if resp.is_pointer_button_down_on() {
+                0.24
+            } else {
+                0.12
+            };
+            p.rect_filled(rect, radius, pal.accent.gamma_multiply(strength));
+        }
+        let mid = rect.center().y;
+        p.text(
+            egui::pos2(rect.left() + NAME_PAD, mid),
+            egui::Align2::LEFT_CENTER,
+            name,
+            FontId::new(body_size(ui), medium()),
+            pal.text,
+        );
+        p.text(
+            egui::pos2(rect.right() - NAME_PAD + 2.0, mid),
+            egui::Align2::RIGHT_CENTER,
+            icon::CARET_RIGHT,
+            FontId::proportional(13.0),
+            arrow,
+        );
+    }
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Open profile")
+}
+
+fn body_size(ui: &egui::Ui) -> f32 {
+    egui::TextStyle::Body.resolve(ui.style()).size
+}
+
+/// How the table's columns share the page.
+struct Columns {
+    name_w: f32,
+    /// Wide enough for everyone's chips on one line, unless the other columns
+    /// need the room (then the chips wrap).
+    sections_w: f32,
+    /// Whether there is room for Title and Joined. Title gives way first;
+    /// each person's profile still shows both.
+    title: bool,
+    joined: bool,
+}
+
+fn columns(ui: &egui::Ui, pal: &Palette, staff: &[&Staff], sums: &HashMap<Id, Summary>) -> Columns {
+    let measure = |t: String, font: FontId| ui.painter().layout_no_wrap(t, font, pal.text).size().x;
+    let text = |t: &str, family: egui::FontFamily| {
+        measure(t.to_owned(), FontId::new(body_size(ui), family))
+    };
+    let head = |t: &str| measure(head_text(t, false, false), FontId::proportional(HEAD_SIZE));
     let widest = |f: &dyn Fn(&Staff) -> f32| staff.iter().map(|s| f(s)).fold(0.0, f32::max);
-    // Names are frameless buttons, which keep their padding.
-    let name = widest(&|s| text(&s.name, medium())) + 2.0 * ui.spacing().button_padding.x;
-    let title = widest(&|s| text(&s.title, egui::FontFamily::Proportional)).max(30.0);
-    let joined = text("28 Dec 2026", egui::FontFamily::Proportional);
+    let name = (widest(&|s| text(&s.name, medium())) + 2.0 * NAME_PAD + NAME_ARROW_W).ceil();
+    let title = widest(&|s| text(&s.title, egui::FontFamily::Proportional)).max(head("Title"));
+    let joined = text("28 Dec 2026", egui::FontFamily::Proportional).max(head("Joined"));
     let pill = widest(&|s| {
         sums.get(&s.id)
             .and_then(|m| m.next.as_ref())
@@ -843,7 +1003,8 @@ fn sections_width(
                     .x
                     + 20.0
             })
-    });
+    })
+    .max(head("Next due"));
     // Checkbox, the row menu, the gaps between seven columns, and some slack.
     let others = 20.0 + name + title + joined + pill + 32.0 + 6.0 * 20.0 + 12.0;
     let chips = widest(&|s| {
@@ -855,11 +1016,20 @@ fn sections_width(
             + 4.0
     });
     let mut room = ui.available_width() - others;
-    let narrow = room < MIN_SECTIONS_W;
-    if narrow {
-        room += title + joined + 2.0 * 20.0;
+    let show_title = room >= MIN_SECTIONS_W;
+    if !show_title {
+        room += title + 20.0;
     }
-    (chips.min(room).max(MIN_SECTIONS_W), narrow)
+    let show_joined = room >= MIN_SECTIONS_W;
+    if !show_joined {
+        room += joined + 20.0;
+    }
+    Columns {
+        name_w: name,
+        sections_w: chips.min(room).max(MIN_SECTIONS_W),
+        title: show_title,
+        joined: show_joined,
+    }
 }
 
 /// The Sections column never gets narrower than this.
@@ -1021,5 +1191,92 @@ fn delete_modal(ctx: &egui::Context, cx: &mut Ctx, state: &mut PersonnelState) {
             Some(Err(e)) => d.error = Some(format!("Couldn't delete: {e}")),
             None => d.error = Some("Start editing to make changes".to_owned()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dates::now_ts;
+    use crate::model::{Assignment, DueOverride, OverrideSource, TestSystem};
+
+    /// Name, title, join year, and tests assigned.
+    fn person(name: &str, title: &str, joined: Option<i32>, tests: &[&str]) -> Staff {
+        let since = now_ts().date_naive();
+        Staff {
+            id: name.into(),
+            name: name.into(),
+            title: title.into(),
+            joined: joined.and_then(|y| NaiveDate::from_ymd_opt(y, 3, 1)),
+            status: StaffStatus::Active,
+            assignments: tests
+                .iter()
+                .map(|t| {
+                    let state = AssignState::Assigned;
+                    ((*t).to_string(), Assignment { state, since })
+                })
+                .collect(),
+        }
+    }
+
+    fn names(sort: SortBy, descending: bool) -> Vec<String> {
+        let mut d = Data::new_empty("t", now_ts());
+        for (i, id) in ["t-chem", "t-haem"].into_iter().enumerate() {
+            d.sections[i].tests = vec![TestSystem {
+                id: id.into(),
+                name: id.into(),
+                order: 0,
+                retired: false,
+                rule_id: None,
+            }];
+        }
+        d.staff = vec![
+            person("Agnes", "", Some(2020), &["t-haem"]),
+            person("Bram", "Senior", None, &[]),
+            person("cara", "MLT", Some(2015), &["t-chem"]),
+            person("Dana", "MLT", Some(2020), &["t-chem", "t-haem"]),
+        ];
+        d.settings.initial_due_days = None;
+        // Only Dana has a due date.
+        d.due_overrides.push(DueOverride {
+            staff_id: "Dana".into(),
+            test_id: "t-chem".into(),
+            due_on: now_ts().date_naive(),
+            source: OverrideSource::Manual,
+            by: "t".into(),
+            at: now_ts(),
+        });
+        let sums = summaries(&d, now_ts().date_naive());
+        let mut staff = filter_staff(&d, &StaffFilter::default());
+        sort_staff(&mut staff, &sums, sort, descending);
+        staff.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn default_sort_is_earliest_join_date_first() {
+        let st = PersonnelState::default();
+        assert_eq!((st.sort, st.descending), (SortBy::Joined, false));
+        assert_eq!(
+            names(st.sort, st.descending),
+            ["cara", "Agnes", "Dana", "Bram"]
+        );
+    }
+
+    #[test]
+    fn no_join_date_stays_last_when_reversed() {
+        assert_eq!(
+            names(SortBy::Joined, true),
+            ["Agnes", "Dana", "cara", "Bram"]
+        );
+    }
+
+    #[test]
+    fn sorts_by_the_other_columns() {
+        let by = |sort| names(sort, false);
+        assert_eq!(by(SortBy::Name), ["Agnes", "Bram", "cara", "Dana"]);
+        assert_eq!(names(SortBy::Name, true), ["Dana", "cara", "Bram", "Agnes"]);
+        assert_eq!(by(SortBy::Title), ["cara", "Dana", "Bram", "Agnes"]);
+        assert_eq!(by(SortBy::Sections), ["cara", "Dana", "Agnes", "Bram"]);
+        assert_eq!(by(SortBy::Due), ["Dana", "Agnes", "Bram", "cara"]);
     }
 }
