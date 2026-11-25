@@ -39,6 +39,39 @@ pub fn stage_label(rule: &Rule, idx: u32) -> String {
     }
 }
 
+/// Where stage `idx` of `rule` sits among the stages of `full`, a rule with at
+/// least as many: the stage of the same name, else first to first and
+/// repeats to repeats.
+pub fn stage_in(full: &Rule, rule: &Rule, idx: u32) -> u32 {
+    let (n, m) = (full.stages.len() as u32, rule.stages.len() as u32);
+    if n <= m || idx == 0 {
+        return idx;
+    }
+    let label = stage_label(rule, idx);
+    if let Some(k) = (0..n).find(|k| stage_label(full, *k) == label) {
+        return k;
+    }
+    let repeats = |r: &Rule| r.stages.last().is_some_and(|s| s.repeats);
+    if idx + 1 >= m && repeats(full) && repeats(rule) {
+        idx + (n - m)
+    } else {
+        idx
+    }
+}
+
+/// The one-off stages of `full` that `rule` does without (a Semi-annual, say).
+pub fn stages_without(full: &Rule, rule: &Rule) -> Vec<u32> {
+    if full.stages.len() <= rule.stages.len() {
+        return Vec::new();
+    }
+    let has: Vec<u32> = (0..rule.stages.len() as u32)
+        .map(|k| stage_in(full, rule, k))
+        .collect();
+    (0..full.stages.len() as u32)
+        .filter(|k| !has.contains(k) && !full.stages[*k as usize].repeats)
+        .collect()
+}
+
 pub struct PairState<'a> {
     pub records: Vec<&'a Record>,
     pub skipped: Vec<u32>,
@@ -220,6 +253,27 @@ mod tests {
             got,
             ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "111th"]
         );
+    }
+
+    #[test]
+    fn a_rule_without_semi_annual_lines_up_with_one_that_has_it() {
+        let full = Rule::default_global();
+        let mut short = full.clone();
+        short.stages.remove(1);
+        let at = |k| stage_in(&full, &short, k);
+        // Initial, 1st Annual, 2nd Annual.
+        assert_eq!([at(0), at(1), at(2)], [0, 2, 3]);
+        assert_eq!(stages_without(&full, &short), [1]);
+        // Named differently: still first to first and repeats to repeats.
+        short.stages[0].label = "Start".into();
+        short.stages[1].label = "Yearly".into();
+        let at = |k| stage_in(&full, &short, k);
+        assert_eq!([at(0), at(1), at(2)], [0, 2, 3]);
+        assert_eq!(stages_without(&full, &short), [1]);
+        // The same number of stages: nothing is missing.
+        assert_eq!(stage_in(&full, &full, 5), 5);
+        assert!(stages_without(&full, &full).is_empty());
+        assert!(stages_without(&short, &full).is_empty());
     }
 
     #[test]

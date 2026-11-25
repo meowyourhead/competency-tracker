@@ -311,7 +311,7 @@ fn filters(ui: &mut egui::Ui, pal: &Palette, data: &Data, f: &mut AuditFilter, t
 }
 
 /// An optional date bound: a chip that turns into a date picker plus a clear button.
-fn date_bound(
+pub(crate) fn date_bound(
     ui: &mut egui::Ui,
     pal: &Palette,
     label: &str,

@@ -1,10 +1,11 @@
-//! Settings: a segmented control over four tabs: sections and test systems,
-//! schedule rules, general settings, and import / export. Each tab lives in
-//! its own file under `settings/`. Every change needs edit mode; exports and
-//! "Open folder" work while viewing.
+//! Settings: a segmented control over five tabs: sections and test systems,
+//! schedule rules, general settings, import / export, and the audit report.
+//! Each tab lives in its own file under `settings/`. Every change needs edit
+//! mode; exports and "Open folder" work while viewing.
 
 mod general;
 mod import_export;
+mod report;
 mod review;
 mod schedule;
 mod sections_tests;
@@ -25,14 +26,16 @@ pub(crate) enum SettingsTab {
     Schedule,
     General,
     Import,
+    Report,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [
+    const ALL: [SettingsTab; 5] = [
         SettingsTab::Sections,
         SettingsTab::Schedule,
         SettingsTab::General,
         SettingsTab::Import,
+        SettingsTab::Report,
     ];
 
     fn label(self) -> &'static str {
@@ -41,6 +44,7 @@ impl SettingsTab {
             SettingsTab::Schedule => "Schedule",
             SettingsTab::General => "General",
             SettingsTab::Import => "Import & export",
+            SettingsTab::Report => "Audit report",
         }
     }
 }
@@ -54,6 +58,7 @@ pub(crate) struct SettingsState {
     schedule: schedule::ScheduleTab,
     general: general::GeneralTab,
     import: import_export::ImportTab,
+    report: report::ReportTab,
 }
 
 pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SettingsState) {
@@ -84,6 +89,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SettingsState) {
         SettingsTab::Sections => sections_tests::show(ui, cx, &mut state.sections),
         SettingsTab::Schedule => schedule::show(ui, cx, &mut state.schedule),
         SettingsTab::General => general::show(ui, cx, &mut state.general),
+        SettingsTab::Report => report::show(ui, cx, &mut state.report),
         SettingsTab::Import => {
             if import_export::show(ui, cx, &mut state.import) {
                 state.wizard = Some(ImportWizard::default());

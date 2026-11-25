@@ -324,11 +324,12 @@ fn stage_key(ui: &mut Ui, pal: &Palette, rule: &Rule, pair: &PairState) {
             } else if let Some(r) = pair.records.iter().find(|r| r.stage_index == i) {
                 fmt_date(r.completed_on)
             } else if pair.skipped.contains(&i) {
-                "Skipped".to_owned()
+                // A stage that doesn't apply to this person or test.
+                "N/A".to_owned()
             } else {
                 "Not yet".to_owned()
             };
-            let done = value != "Not yet" && value != "Skipped";
+            let done = value != "Not yet" && value != "N/A";
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.horizontal(|ui| {

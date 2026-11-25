@@ -49,7 +49,12 @@ pub(super) fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut ImportTab) -> bool 
     });
     let mut export = None;
     card(ui, pal, "Export", |ui| {
-        ui.label(RichText::new("Save an Excel copy for audits and inspections.").color(pal.muted));
+        ui.label(
+            RichText::new(
+                "Save a simple Excel copy. For audits and inspections, use the Audit report tab.",
+            )
+            .color(pal.muted),
+        );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui
@@ -79,7 +84,7 @@ fn run_export(cx: &mut Ctx, kind: Export) {
         Export::History => "history",
     };
     let default_name = format!("Competency {word} {}.xlsx", fmt_date(cx.today));
-    let Some(path) = save_dialog(&default_name) else {
+    let Some(path) = save_dialog(&default_name, "Excel workbook", "xlsx") else {
         return;
     };
     let data = cx.session.data();
@@ -94,16 +99,21 @@ fn run_export(cx: &mut Ctx, kind: Export) {
     cx.toasts.push(Toast::new(msg));
 }
 
-fn save_dialog(default_name: &str) -> Option<PathBuf> {
+/// Asks where to save a file of this kind; the path always ends in `ext`.
+pub(super) fn save_dialog(default_name: &str, kind: &str, ext: &str) -> Option<PathBuf> {
     let mut path = rfd::FileDialog::new()
-        .add_filter("Excel workbook", &["xlsx"])
+        .add_filter(kind, &[ext])
         .set_file_name(default_name)
         .save_file()?;
     if !path
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("xlsx"))
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
     {
-        path.set_extension("xlsx");
+        // Not `set_extension`: a name may have dots of its own.
+        let mut name = path.into_os_string();
+        name.push(".");
+        name.push(ext);
+        path = PathBuf::from(name);
     }
     Some(path)
 }

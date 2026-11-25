@@ -7,6 +7,7 @@ pub mod model;
 pub mod ops;
 pub mod prefs;
 pub mod query;
+pub mod report;
 pub mod schedule;
 pub mod session;
 pub mod snapshot;

@@ -877,6 +877,9 @@ fn skip_stage_asks_first() {
     let skipped = &h.state().session().data().skipped;
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0].stage_index, 1);
+    // It reads as not applicable, in the panel's list of stages.
+    h.get_by_label("N/A");
+    assert!(h.query_by_label("Skipped").is_none());
 }
 
 #[test]
@@ -1106,6 +1109,28 @@ fn batch_assign_section() {
     let data = h.state().session().data();
     let agnes = data.staff.iter().find(|s| s.id == "p-agnes").unwrap();
     assert_eq!(agnes.assignments.len(), 2, "both Chemistry tests");
+}
+
+#[test]
+fn view_switch_sits_right_of_the_sort_and_never_stacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    button(&h, "Sections").click();
+    h.run();
+    for width in [1280.0, 960.0, 800.0] {
+        h.set_size(egui::vec2(width, 700.0));
+        h.run();
+        h.run();
+        let sort = h.get_by_label_contains("Sort: ").rect();
+        let due = button(&h, "Next due").rect();
+        let done = button(&h, "Completed").rect();
+        assert!((due.center().y - done.center().y).abs() < 1.0, "{width}");
+        assert!(due.right() < done.left());
+        if width > 1000.0 {
+            assert!(due.left() > sort.right());
+            assert!((due.center().y - sort.center().y).abs() < 1.0);
+        }
+    }
 }
 
 #[test]
@@ -1828,6 +1853,65 @@ fn history_reverts_the_latest_change_first() {
     h.run();
     let b = h.get_by_label_contains("Revert latest change");
     assert!(b.accesskit_node().is_disabled());
+}
+
+#[test]
+fn audit_report_tab_offers_both_formats_while_viewing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = seeded(&dir, 365);
+    button(&h, "Stop editing").click();
+    h.run();
+    go_settings_tab(&mut h, "Audit report");
+    h.get_by_label("2 staff \u{b7} 2 assessments");
+    for label in ["Export to Excel\u{2026}", "Export to PDF\u{2026}"] {
+        let b = h.get_by_label_contains(label);
+        assert!(!b.accesskit_node().is_disabled(), "{label}");
+    }
+    // Everything is ticked but the change log and removed staff.
+    let ticked = |h: &Harness<'static, TrackerApp>, label: &str| {
+        let b = h.get_by_role_and_label(egui::accesskit::Role::CheckBox, label);
+        b.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
+    };
+    let parts = ["Summary", "Matrix", "Data checks", "Schedule"];
+    for p in parts {
+        assert!(ticked(&h, p), "{p}");
+    }
+    for p in ["Change log", "Include removed staff"] {
+        assert!(!ticked(&h, p), "{p}");
+    }
+    // The matrix shows one date, the next due, until another mode is picked.
+    let picked = |h: &Harness<'static, TrackerApp>, label: &str| {
+        button(h, label).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
+            || button(h, label).accesskit_node().is_selected() == Some(true)
+    };
+    assert!(picked(&h, "Next due") && !picked(&h, "Both"));
+    button(&h, "Both").click();
+    h.run();
+    assert!(picked(&h, "Both") && !picked(&h, "Next due"));
+    // The dates come with the change log; its description ticks it too.
+    assert!(h.query_by_label("From date").is_none());
+    h.get_by_label("Who changed what, and when").click();
+    h.run();
+    assert!(ticked(&h, "Change log"));
+    h.get_by_label("From date");
+    // Nothing ticked: nothing to export.
+    for p in parts.into_iter().chain(["Change log"]) {
+        h.get_by_role_and_label(egui::accesskit::Role::CheckBox, p)
+            .click();
+        h.run();
+    }
+    h.get_by_label("Tick at least one part to include.");
+    let b = h.get_by_label_contains("Export to PDF");
+    assert!(b.accesskit_node().is_disabled());
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Matrix")
+        .click();
+    h.run();
+    // Narrowing to a section with nothing in it.
+    h.get_by_label_contains("Section  ").click();
+    h.run();
+    button(&h, "Urinalysis").click();
+    h.run();
+    h.get_by_label("0 staff \u{b7} 0 assessments");
 }
 
 #[test]

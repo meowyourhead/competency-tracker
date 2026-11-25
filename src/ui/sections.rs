@@ -17,16 +17,18 @@ use egui::text::LayoutJob;
 use std::collections::{BTreeMap, HashMap};
 
 use egui::{
-    Align, Align2, Button, Color32, CornerRadius, CursorIcon, FontId, Layout, Popup, Rect,
-    RichText, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, Vec2, WidgetInfo, WidgetType,
+    Align, Align2, Button, Color32, CornerRadius, CursorIcon, FontId, Popup, Rect, RichText,
+    ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 use egui_phosphor::regular as icon;
 
 use crate::dates::fmt_date;
-use crate::model::{AssignState, Data, Id, Rule, Section};
+use crate::model::{AssignState, Data, Id, Record, Rule, Section};
 use crate::ops;
 use crate::query::{distinct_titles, Index, StatusFilter};
-use crate::schedule::{classify, next_due, stage_label, DueInfo, DueStatus};
+use crate::schedule::{
+    classify, next_due, stage_in, stage_label, stages_without, DueInfo, DueStatus,
+};
 use crate::session::Session;
 use crate::ui::app::{Ctx, Toast};
 use crate::ui::theme::{medium, Palette};
@@ -157,7 +159,9 @@ enum CellView {
         delayed: bool,
         /// Every completion, oldest first.
         done: Vec<Done>,
-        skipped: Vec<u32>,
+        /// Stages that don't apply: left out for this person, or not in the
+        /// test's rule.
+        na: Vec<u32>,
     },
     Na,
     Unassigned,
@@ -174,8 +178,8 @@ struct Row {
 struct Grid {
     /// (test id, test name), in configured order.
     columns: Vec<(Id, String)>,
-    /// Each column's schedule rule.
-    rules: Vec<Rule>,
+    /// The rule whose stages the Completed view lists (see `fullest_rule`).
+    rule: Rule,
     rows: Vec<Row>,
 }
 
@@ -217,7 +221,6 @@ impl SectionsState {
 fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Combined {
     let all = data.sections_sorted();
     let mut columns = Vec::new();
-    let mut rules = Vec::new();
     let mut groups = Vec::new();
     for s in sections {
         let g = &grids[&s.id];
@@ -232,7 +235,6 @@ fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Com
             len: g.columns.len(),
         });
         columns.extend(g.columns.iter().cloned());
-        rules.extend(g.rules.iter().cloned());
     }
     // Everyone in any section: the first section's people in its order, then
     // whoever the next section adds, and so on.
@@ -266,16 +268,32 @@ fn combine(data: &Data, sections: &[&Section], grids: &HashMap<Id, Grid>) -> Com
     Combined {
         grid: Grid {
             columns,
-            rules,
+            rule: fullest_rule(data),
             rows,
         },
         groups,
     }
 }
 
+/// The rule with the most stages among those in use: its stages are the lines
+/// of the Completed view, and every test's own stages are placed on them.
+fn fullest_rule(data: &Data) -> Rule {
+    let live = data.sections.iter().filter(|s| !s.retired);
+    let tests = live.flat_map(|s| s.tests.iter().filter(|t| !t.retired));
+    let mut full = data.rule_for_test("");
+    for t in tests {
+        let r = data.rule_for_test(&t.id);
+        if r.stages.len() > full.stages.len() {
+            full = r;
+        }
+    }
+    full.clone()
+}
+
 fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> Grid {
     let mut tests: Vec<_> = section.tests.iter().filter(|t| !t.retired).collect();
     tests.sort_by_key(|t| t.order);
+    let full = fullest_rule(data);
     let mut staff: Vec<_> = data
         .staff
         .iter()
@@ -295,6 +313,15 @@ fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> 
                 .map(|t| match s.assignments.get(&t.id).map(|a| a.state) {
                     Some(AssignState::Assigned) => {
                         let rule = data.rule_for_test(&t.id);
+                        let at = |stage| stage_in(&full, rule, stage);
+                        // A completion keeps the stage it was recorded as,
+                        // even if the test's rule lost a stage since.
+                        let place = |r: &Record| {
+                            let shorter = rule.stages.len() < full.stages.len();
+                            (0..MAX_STAGES)
+                                .find(|k| shorter && stage_label(&full, *k) == r.stage_label)
+                                .unwrap_or_else(|| at(r.stage_index))
+                        };
                         let pair = idx.pair(&s.id, &t.id);
                         let info = next_due(rule, &pair, &data.settings);
                         let status = classify(info.due_on, today, data.settings.due_soon_days);
@@ -306,18 +333,20 @@ fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> 
                             .records
                             .iter()
                             .map(|r| Done {
-                                stage: r.stage_index,
+                                stage: place(r),
                                 on: r.completed_on,
                                 unconfirmed: r.unconfirmed,
                             })
                             .collect();
                         done.sort_by_key(|d| (d.on, d.stage));
+                        let mut na = stages_without(&full, rule);
+                        na.extend(pair.skipped.iter().map(|s| at(*s)));
                         CellView::Due {
                             info,
                             status,
                             delayed,
                             done,
-                            skipped: pair.skipped,
+                            na,
                         }
                     }
                     Some(AssignState::Na) => CellView::Na,
@@ -337,10 +366,7 @@ fn build_grid(data: &Data, idx: &Index, section: &Section, today: NaiveDate) -> 
             .iter()
             .map(|t| (t.id.clone(), t.name.clone()))
             .collect(),
-        rules: tests
-            .iter()
-            .map(|t| data.rule_for_test(&t.id).clone())
-            .collect(),
+        rule: full,
         rows,
     }
 }
@@ -417,18 +443,14 @@ fn visible(
     (cols, rows, sort_col)
 }
 
-/// The lines the Completed view shows for one person: the stages of the test
-/// with the most (normally every test shares the Global rule), a line for
+/// The lines the Completed view shows for one person: every stage, a line for
 /// every further annual they have done in any of `cols`, then "Next due".
 fn stage_lines(grid: &Grid, cols: &[usize], row: &Row) -> Vec<Line> {
     let mut lines = Vec::new();
-    let Some(rule) = cols
-        .iter()
-        .map(|&c| &grid.rules[c])
-        .max_by_key(|r| r.stages.len())
-    else {
+    if cols.is_empty() {
         return lines;
-    };
+    }
+    let rule = &grid.rule;
     // How many lines each stage needs (more than one only when a cell has
     // several completions of the same stage).
     let mut need: BTreeMap<u32, usize> = (0..rule.stages.len() as u32).map(|k| (k, 1)).collect();
@@ -463,6 +485,9 @@ fn stage_lines(grid: &Grid, cols: &[usize], row: &Row) -> Vec<Line> {
 }
 
 const NEXT_DUE: &str = "Next due";
+
+/// How far along a schedule a recorded stage's name is looked for.
+const MAX_STAGES: u32 = 60;
 
 /// Applies what the user did in a grid.
 fn apply_action(cx: &mut Ctx, sort_by_test: &mut Option<Id>, action: Option<GridAction>) {
@@ -510,19 +535,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
     } else {
         Some(section.id.as_str())
     };
-    // Sections on the left, the view switch on the right. The switch is
-    // placed first, so on a narrow page the sections wrap beside it.
-    let picked = ui
-        .with_layout(Layout::right_to_left(Align::Min), |ui| {
-            view_switch(ui, pal, &mut state.view);
-            ui.add_space(12.0);
-            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-                section_pills(ui, pal, &sections, current)
-            })
-            .inner
-        })
-        .inner;
-    if let Some(picked) = picked {
+    if let Some(picked) = section_pills(ui, pal, &sections, current) {
         match picked {
             None => state.all = true,
             Some(id) => {
@@ -571,6 +584,7 @@ pub(crate) fn show(ui: &mut egui::Ui, cx: &mut Ctx, state: &mut SectionsState) {
         title,
         text,
         sort,
+        view,
     ) {
         *sort_by_test = None;
     }
@@ -663,7 +677,9 @@ fn show_all(
     {
         *test = None;
     }
-    if filters(ui, pal, data, &columns, status, test, title, text, sort) {
+    if filters(
+        ui, pal, data, &columns, status, test, title, text, sort, view,
+    ) {
         *sort_by_test = None;
     }
     ui.add_space(10.0);
@@ -733,16 +749,32 @@ fn section_pills(
     }
 }
 
-/// "Next due" / "Completed".
+/// "Next due" / "Completed", whole on the next line when this one is full.
 fn view_switch(ui: &mut egui::Ui, pal: &Palette, view: &mut View) {
+    const VIEWS: [&str; 2] = ["Next due", "Completed"];
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let words: f32 = VIEWS
+        .iter()
+        .map(|v| {
+            let p = ui.painter();
+            p.layout_no_wrap((*v).to_owned(), font.clone(), pal.text)
+                .size()
+                .x
+        })
+        .sum();
+    // Each choice's padding, and the track around them.
+    let left = ui.available_size_before_wrap().x;
+    if left < words + 4.0 * ui.spacing().button_padding.x + 12.0 {
+        ui.end_row();
+    }
     let at = usize::from(*view == View::Completed);
-    if let Some(i) = segmented(ui, pal, at, &["Next due", "Completed"]) {
+    if let Some(i) = segmented(ui, pal, at, &VIEWS) {
         *view = if i == 0 { View::Due } else { View::Completed };
     }
 }
 
-/// One row: the name search, the status, test system and title chips, then
-/// the sort. Returns true when a sort was picked.
+/// One row: the name search, the status, test system and title chips, the
+/// sort, then which view. Returns true when a sort was picked.
 #[allow(clippy::too_many_arguments)]
 fn filters(
     ui: &mut egui::Ui,
@@ -754,6 +786,7 @@ fn filters(
     title: &mut Option<String>,
     text: &mut String,
     sort: &mut RowSort,
+    view: &mut View,
 ) -> bool {
     let mut sorted = false;
     let statuses = [
@@ -768,6 +801,8 @@ fn filters(
         .map(|t| (t.clone(), t))
         .collect();
     ui.horizontal_wrapped(|ui| {
+        // As tall as the view switch, so everything on the row centres on it.
+        ui.set_row_height(ui.spacing().interact_size.y + 8.0);
         search_box(ui, text, "Search by name", SEARCH_W);
         let mut chosen = (*status != StatusFilter::All).then_some(*status);
         if chip_select(ui, "Status", &mut chosen, &statuses) {
@@ -776,6 +811,7 @@ fn filters(
         chip_select(ui, "Test system", test, columns);
         chip_select(ui, "Title", title, &titles);
         sorted = sort_select(ui, sort);
+        view_switch(ui, pal, view);
         let any = *status != StatusFilter::All
             || test.is_some()
             || title.is_some()
@@ -1359,7 +1395,7 @@ fn cell(
             status,
             delayed,
             done,
-            skipped,
+            na,
         } => {
             let lines = lines.unwrap_or_default();
             let line_y = |k: usize| rect.top() + BLOCK_PAD + (k as f32 + 0.5) * LINE_H;
@@ -1382,11 +1418,11 @@ fn cell(
                         FontId::proportional(12.5),
                         color,
                     );
-                } else if l.nth == 0 && skipped.contains(&stage) {
+                } else if l.nth == 0 && na.contains(&stage) {
                     p.text(
                         at,
                         Align2::CENTER_CENTER,
-                        "Skipped",
+                        "N/A",
                         FontId::proportional(11.5),
                         pal.muted.gamma_multiply(0.8),
                     );
@@ -1415,8 +1451,8 @@ fn cell(
                     let mark = if d.unconfirmed { " (unconfirmed)" } else { "" };
                     text.push(format!("{}: {}{mark}", l.label, fmt_date(d.on)));
                 }
-                if !any && skipped.contains(&stage) {
-                    text.push(format!("{}: skipped", l.label));
+                if !any && na.contains(&stage) {
+                    text.push(format!("{}: N/A", l.label));
                 }
             }
             text.push(format!(
@@ -1452,4 +1488,93 @@ fn cell(
     }
     resp.clicked()
         .then(|| GridAction::Open(row.id.clone(), test.0.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dates::now_ts;
+    use crate::model::{Assignment, Skipped, Staff, StaffStatus, TestSystem};
+
+    /// Two Chemistry tests, B on a rule without Semi-annual, done by one person
+    /// (Initial, 1st Annual; `label` is what B's annual was recorded as).
+    fn cells(annual_index: u32, skip: bool) -> Vec<CellView> {
+        let now = now_ts();
+        let today = now.date_naive();
+        let mut d = Data::new_empty("t", now);
+        let mut short = Rule::default_global();
+        short.id = "r-short".into();
+        short.stages.remove(1);
+        d.rules.push(short);
+        for (i, id) in ["a", "b"].into_iter().enumerate() {
+            d.sections[0].tests.push(TestSystem {
+                id: id.into(),
+                name: id.into(),
+                order: i as u32,
+                retired: false,
+                rule_id: (i == 1).then(|| "r-short".into()),
+            });
+            for (stage, label) in [(0, "Initial"), (annual_index, "1st Annual")] {
+                d.records.push(Record {
+                    id: format!("{id}{stage}"),
+                    staff_id: "p".into(),
+                    test_id: id.into(),
+                    stage_index: stage,
+                    stage_label: label.into(),
+                    completed_on: today,
+                    comment: String::new(),
+                    by: "t".into(),
+                    at: now,
+                    imported: false,
+                    unconfirmed: false,
+                });
+            }
+        }
+        if skip {
+            d.skipped.push(Skipped {
+                staff_id: "p".into(),
+                test_id: "a".into(),
+                stage_index: 1,
+                by: "t".into(),
+                at: now,
+            });
+        }
+        let assigned = Assignment {
+            state: AssignState::Assigned,
+            since: today,
+        };
+        d.staff.push(Staff {
+            id: "p".into(),
+            name: "P".into(),
+            title: String::new(),
+            joined: None,
+            status: StaffStatus::Active,
+            assignments: ["a", "b"].map(|t| (t.to_string(), assigned.clone())).into(),
+        });
+        let grid = build_grid(&d, &Index::build(&d), &d.sections[0], today);
+        assert_eq!(grid.rule.stages.len(), 3, "the lines are the fuller rule's");
+        grid.rows[0].cells.clone()
+    }
+
+    fn view(c: &CellView) -> (Vec<u32>, Vec<u32>) {
+        let CellView::Due { done, na, .. } = c else {
+            panic!("assigned")
+        };
+        (done.iter().map(|d| d.stage).collect(), na.clone())
+    }
+
+    #[test]
+    fn a_rule_without_semi_annual_shows_it_as_na() {
+        // Recorded under its own rule, or while it still had a Semi-annual.
+        for annual_index in [1, 2] {
+            let c = cells(annual_index, false);
+            assert_eq!(view(&c[1]), (vec![0, 2], vec![1]), "{annual_index}");
+        }
+    }
+
+    #[test]
+    fn a_stage_left_out_for_a_person_is_na_too() {
+        assert_eq!(view(&cells(2, false)[0]).1, Vec::<u32>::new());
+        assert_eq!(view(&cells(2, true)[0]), (vec![0, 2], vec![1]));
+    }
 }
