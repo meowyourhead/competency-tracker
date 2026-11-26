@@ -1361,14 +1361,15 @@ fn profile_opens_as_table_with_its_buttons_right_above() {
     let head = h.get_by_label("Last done").rect();
     let next = h.get_by_label_contains("Next up:").rect();
     let table = h.get_by_label("Table").rect();
-    for b in [
-        table,
-        h.get_by_label("Cards").rect(),
-        h.get_by_label_contains("  Edit").rect(),
-    ] {
+    for b in [table, h.get_by_label("Cards").rect()] {
         assert!(b.top() > next.bottom() && b.bottom() < head.top());
         assert!(b.left() - table.left() < 250.0, "on the left");
     }
+    // Edit sits on the name's line, just right of it.
+    let name = h.get_by_label("Agnes").rect();
+    let edit = h.get_by_label_contains("  Edit").rect();
+    assert!(edit.left() > name.right() && edit.left() - name.right() < 40.0);
+    assert!(edit.center().y > name.top() && edit.center().y < name.bottom());
     h.get_by_label("Cobas").click();
     h.run();
     h.get_by_label("Close panel");

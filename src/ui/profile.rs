@@ -94,7 +94,11 @@ pub(crate) fn show(
         out.back = true;
     }
     ui.add_space(2.0);
-    heading(ui, &staff.name);
+    ui.horizontal(|ui| {
+        heading(ui, &staff.name);
+        ui.add_space(8.0);
+        out.edit = edit_button(ui, editing);
+    });
     let mut bits = Vec::new();
     if !staff.title.is_empty() {
         bits.push(staff.title.clone());
@@ -112,7 +116,6 @@ pub(crate) fn show(
     }
     if rows.is_empty() {
         ui.add_space(12.0);
-        out.edit = edit_button(ui, editing);
         empty_state(
             ui,
             "No assignments",
@@ -150,7 +153,6 @@ pub(crate) fn show(
         if let Some(i) = segmented(ui, pal, current, &["Table", "Cards"]) {
             *cx.profile_view = VIEWS[i];
         }
-        out.edit = edit_button(ui, editing);
     });
     ui.add_space(4.0);
 
