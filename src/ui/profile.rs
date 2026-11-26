@@ -94,7 +94,11 @@ pub(crate) fn show(
         out.back = true;
     }
     ui.add_space(2.0);
-    heading(ui, &staff.name);
+    ui.horizontal(|ui| {
+        heading(ui, &staff.name);
+        ui.add_space(6.0);
+        out.edit = edit_button(ui, editing);
+    });
     let mut bits = Vec::new();
     if !staff.title.is_empty() {
         bits.push(staff.title.clone());
@@ -112,7 +116,6 @@ pub(crate) fn show(
     }
     if rows.is_empty() {
         ui.add_space(12.0);
-        out.edit = edit_button(ui, editing);
         empty_state(
             ui,
             "No assignments",
@@ -144,13 +147,12 @@ pub(crate) fn show(
     ui.add_space(14.0);
 
     // Right above the tests, on the left, where the eye already is.
-    ui.horizontal_wrapped(|ui| {
-        const VIEWS: [ProfileView; 2] = [ProfileView::Table, ProfileView::Cards];
-        let current = usize::from(*cx.profile_view == ProfileView::Cards);
+    const VIEWS: [ProfileView; 2] = [ProfileView::Table, ProfileView::Cards];
+    let current = usize::from(*cx.profile_view == ProfileView::Cards);
+    ui.horizontal(|ui| {
         if let Some(i) = segmented(ui, pal, current, &["Table", "Cards"]) {
             *cx.profile_view = VIEWS[i];
         }
-        out.edit = edit_button(ui, editing);
     });
     ui.add_space(4.0);
 
